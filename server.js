@@ -1,11 +1,10 @@
 import express from "express";
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT;
 
 app.get("/", (_req, res) => {
-  console.log("GET / recebido");
-  res.status(200).send("OK ROOT");
+  res.status(200).json({ status: "ok" });
 });
 
 app.get("/bling/oauth", (req, res) => {
