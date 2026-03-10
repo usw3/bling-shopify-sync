@@ -85,6 +85,10 @@ async function requestToken(params) {
     logger.warn("Bling token endpoint returned non-success status", {
       status: response.status,
       grantType: params.grant_type,
+      responseBody,
+      hasCode: Boolean(params.code),
+      hasClientId: Boolean(process.env.BLING_CLIENT_ID),
+      hasClientSecret: Boolean(process.env.BLING_CLIENT_SECRET),
     });
 
     throw new Error(

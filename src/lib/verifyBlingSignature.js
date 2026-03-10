@@ -1,5 +1,9 @@
 import crypto from "node:crypto";
 
+import { createLogger } from "./logger.js";
+
+const logger = createLogger("verifyBlingSignature");
+
 function normalizeRawBody(rawBody) {
   if (!rawBody) {
     return null;
@@ -35,28 +39,81 @@ function normalizeHexSignature(signature) {
 }
 
 export function verifyBlingSignature({ rawBody, signature, secret }) {
-  if (!rawBody || !signature || !secret) {
+  const payloadBuffer = normalizeRawBody(rawBody);
+  const hasRawBody = Boolean(payloadBuffer);
+  const rawBodyLength = payloadBuffer ? payloadBuffer.length : 0;
+  const hasSecret = Boolean(secret);
+  const receivedSignature = typeof signature === "string" ? signature : null;
+
+  let expectedHex = null;
+  let expectedBase64 = null;
+
+  if (hasRawBody && hasSecret) {
+    const expectedDigestBuffer = crypto.createHmac("sha256", secret).update(payloadBuffer).digest();
+    expectedHex = expectedDigestBuffer.toString("hex");
+    expectedBase64 = expectedDigestBuffer.toString("base64");
+  }
+
+  if (!hasRawBody || !receivedSignature || !hasSecret) {
+    logger.info("Bling signature validation debug", {
+      hasRawBody,
+      rawBodyLength,
+      hasWebhookSecret: hasSecret,
+      xBlingSignature256: receivedSignature,
+      expectedSignatureHex: expectedHex,
+      expectedSignatureBase64: expectedBase64,
+      finalValidationResult: false,
+    });
     return false;
   }
 
-  const payloadBuffer = normalizeRawBody(rawBody);
-  const normalizedSignature = normalizeHexSignature(signature);
+  const normalizedSignature = normalizeHexSignature(receivedSignature);
 
   if (!payloadBuffer || !normalizedSignature) {
+    logger.info("Bling signature validation debug", {
+      hasRawBody,
+      rawBodyLength,
+      hasWebhookSecret: hasSecret,
+      xBlingSignature256: receivedSignature,
+      expectedSignatureHex: expectedHex,
+      expectedSignatureBase64: expectedBase64,
+      finalValidationResult: false,
+    });
     return false;
   }
 
-  const expectedDigest = crypto.createHmac("sha256", secret).update(payloadBuffer).digest("hex");
-  const expectedBuffer = Buffer.from(expectedDigest, "hex");
+  const expectedBuffer = Buffer.from(expectedHex, "hex");
   const signatureBuffer = Buffer.from(normalizedSignature, "hex");
 
   if (signatureBuffer.length !== expectedBuffer.length) {
+    logger.info("Bling signature validation debug", {
+      hasRawBody,
+      rawBodyLength,
+      hasWebhookSecret: hasSecret,
+      xBlingSignature256: receivedSignature,
+      expectedSignatureHex: expectedHex,
+      expectedSignatureBase64: expectedBase64,
+      finalValidationResult: false,
+    });
     return false;
   }
 
+  let isValid = false;
   try {
-    return crypto.timingSafeEqual(signatureBuffer, expectedBuffer);
+    isValid = crypto.timingSafeEqual(signatureBuffer, expectedBuffer);
   } catch (_error) {
-    return false;
+    isValid = false;
   }
+
+  logger.info("Bling signature validation debug", {
+    hasRawBody,
+    rawBodyLength,
+    hasWebhookSecret: hasSecret,
+    xBlingSignature256: receivedSignature,
+    expectedSignatureHex: expectedHex,
+    expectedSignatureBase64: expectedBase64,
+    finalValidationResult: isValid,
+  });
+
+  return isValid;
 }
