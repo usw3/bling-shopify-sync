@@ -428,7 +428,10 @@ function applyFinalPayloadGuard(payload, product) {
   const guardedProduct = guarded.product && typeof guarded.product === "object" ? guarded.product : {};
 
   guardedProduct.title =
-    normalizeString(guardedProduct.title) || normalizeSku(product?.id) || normalizeSku(product?.codigo) || "Produto sem título";
+    normalizeString(guardedProduct.title) ||
+    normalizeSku(product?.id) ||
+    normalizeSku(product?.codigo) ||
+    "Produto sem título";
   guardedProduct.body_html = normalizeString(guardedProduct.body_html);
   guardedProduct.vendor = normalizeString(guardedProduct.vendor);
   guardedProduct.product_type = normalizeString(guardedProduct.product_type);
@@ -475,6 +478,111 @@ function extractComplement(product) {
     product.complemento_descricao ??
     null
   );
+}
+
+function buildSyncTraceId(sourceProductId, sku) {
+  const cleanId = normalizeSku(sourceProductId) || "no-id";
+  const cleanSku = normalizeSku(sku) || "no-sku";
+  return `${Date.now()}_${cleanId}_${cleanSku}`;
+}
+
+function extractErrorDetails(error) {
+  const details = error?.details ?? {};
+
+  return {
+    error_code: error?.code ?? null,
+    error_message: error?.message ?? "unknown_error",
+    error_status: error?.status ?? details?.status ?? null,
+    error_status_text: error?.statusText ?? details?.statusText ?? null,
+    error_endpoint: error?.endpoint ?? details?.endpoint ?? null,
+    error_method: error?.method ?? details?.method ?? null,
+    error_response_body:
+      error?.responseBody ?? details?.responseBody ?? details?.parsedBody ?? details?.body ?? null,
+    error_response_errors: error?.responseErrors ?? details?.responseErrors ?? null,
+    error_graphql_errors: error?.graphqlErrors ?? details?.graphqlErrors ?? null,
+    error_graphql_user_errors: error?.graphqlUserErrors ?? details?.graphqlUserErrors ?? null,
+    error_operation_name: error?.operationName ?? details?.operationName ?? null,
+  };
+}
+
+function rootCauseSummary(error) {
+  if (!error) {
+    return "unknown_error";
+  }
+
+  if (error?.message) {
+    return error.message;
+  }
+
+  return "unknown_error";
+}
+
+function buildStageError(stage, context, error) {
+  const wrapped = new Error(
+    `product_sync_failure stage=${stage} trace=${context.sync_trace_id} cause=${rootCauseSummary(error)}`,
+  );
+
+  wrapped.code = "product_sync_failure";
+  wrapped.stage = stage;
+  wrapped.sync_trace_id = context.sync_trace_id;
+  wrapped.source_product_id = context.source_product_id;
+  wrapped.sku = context.sku;
+  wrapped.title = context.normalized_title;
+  wrapped.result_stage = stage;
+  wrapped.root_cause_summary = rootCauseSummary(error);
+  wrapped.cause = error;
+  wrapped.details = {
+    ...extractErrorDetails(error),
+    sync_trace_id: context.sync_trace_id,
+    stage,
+    source_product_id: context.source_product_id,
+    sku: context.sku,
+    title: context.normalized_title,
+  };
+
+  return wrapped;
+}
+
+function buildPayloadSummary(payload, metafieldsToWrite = []) {
+  const productPayload = payload?.product ?? {};
+  const variants = Array.isArray(productPayload.variants) ? productPayload.variants : [];
+  const firstVariant = variants[0] ?? {};
+
+  return {
+    title: normalizeString(productPayload.title),
+    body_html_length: normalizeString(productPayload.body_html).length,
+    vendor: normalizeString(productPayload.vendor),
+    product_type: normalizeString(productPayload.product_type),
+    tags: normalizeString(productPayload.tags),
+    handle: normalizeString(productPayload.handle) || null,
+    images_count: Array.isArray(productPayload.images) ? productPayload.images.length : 0,
+    variant_count: variants.length,
+    first_variant_sku: normalizeSku(firstVariant.sku),
+    first_variant_price: normalizePrice(firstVariant.price),
+    metafields_to_write: metafieldsToWrite,
+  };
+}
+
+function buildBaseLogContext({
+  syncTraceId,
+  sourceProductId,
+  sku,
+  normalizedTitle,
+  imagesIncluded,
+  shopDomain,
+  handle,
+  intent,
+}) {
+  return {
+    sync_trace_id: syncTraceId,
+    source_product_id: sourceProductId,
+    sku: sku || null,
+    normalized_title: normalizedTitle || null,
+    images_included: Boolean(imagesIncluded),
+    shop_domain: shopDomain || null,
+    handle: handle || null,
+    intent: intent || null,
+  };
 }
 
 function logProductNormalizationDiagnostics(product, payload) {
@@ -526,57 +634,330 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
     throw new Error("missing_product_payload");
   }
 
+  const sourceProductId = normalizeSku(product.id ?? product.codigo ?? product.codigoBling ?? product.sku) || "no-id";
   const sku = normalizeSku(product.codigo ?? product.sku ?? product.codigoBling ?? product.id);
-  const extractedImages = extractImages(product);
-  const rawPayload = buildShopifyPayload(product, extractedImages.images);
-  const shopifyPayload = applyFinalPayloadGuard(rawPayload, product);
-  const payloadWillIncludeImages = Array.isArray(shopifyPayload?.product?.images) && shopifyPayload.product.images.length > 0;
+  const syncTraceId = buildSyncTraceId(sourceProductId, sku);
+  const shopDomain = normalizeString(process.env.SHOPIFY_STORE).replace(/^https?:\/\//, "") || null;
 
-  logger.info("product_sync_image_diagnostics", {
-    ...extractedImages.diagnostics,
-    payload_will_include_images: payloadWillIncludeImages,
+  let stage = "start";
+  let resultStage = "unknown";
+  let intent = null;
+  let normalizedTitle = null;
+  let imagesIncluded = false;
+  let handle = normalizeString(product.handle ?? product.slug) || null;
+
+  const baseContext = () =>
+    buildBaseLogContext({
+      syncTraceId,
+      sourceProductId,
+      sku,
+      normalizedTitle,
+      imagesIncluded,
+      shopDomain,
+      handle,
+      intent,
+    });
+
+  logger.info("product_sync_start", {
+    ...baseContext(),
+    event_type: eventType,
+    raw_source_keys: Object.keys(product ?? {}),
   });
 
-  if (!payloadWillIncludeImages && extractedImages.diagnostics.image_candidates_count > 0) {
-    logger.info("Product sync will proceed without images after filtering");
-  }
+  try {
+    stage = "source_resolved";
+    logger.info("product_sync_source_resolved", {
+      ...baseContext(),
+      source_fields: {
+        id: normalizeSku(product.id),
+        codigo: normalizeSku(product.codigo),
+        codigoBling: normalizeSku(product.codigoBling),
+        sku: normalizeSku(product.sku),
+      },
+    });
 
-  logProductNormalizationDiagnostics(product, shopifyPayload);
+    const extractedImages = extractImages(product);
+    const rawPayload = buildShopifyPayload(product, extractedImages.images);
+    const shopifyPayload = applyFinalPayloadGuard(rawPayload, product);
 
-  const existing = sku ? await findVariantBySku(sku) : null;
-  let result;
-
-  if (existing?.product?.id) {
-    result = await updateShopifyProduct(existing.product.id, shopifyPayload);
-    logger.info("Shopify product updated", { sku, eventType, productId: existing.product.id });
-  } else {
-    result = await createShopifyProduct(shopifyPayload);
-    logger.info("Shopify product created", { sku, eventType, productId: result?.product?.id });
-  }
-
-  if (result?.product?.id) {
-    const ownerId = existing?.product?.gqlId ?? `gid://shopify/Product/${result.product.id}`;
+    imagesIncluded = Array.isArray(shopifyPayload?.product?.images) && shopifyPayload.product.images.length > 0;
+    normalizedTitle = normalizeString(shopifyPayload?.product?.title) || null;
+    handle = normalizeString(shopifyPayload?.product?.handle ?? handle) || null;
 
     const shortDescription = normalizeString(extractShortDescription(product));
-    if (shortDescription) {
-      await setProductMetafield(ownerId, "descricao_curta", shortDescription, "single_line_text_field");
-      logger.info("Mapped descricao_curta to metafield", {
-        ownerId,
-        key: "custom.descricao_curta",
-        type: "single_line_text_field",
-      });
-    }
-
     const complement = normalizeString(extractComplement(product));
+    const metafieldsToWrite = [];
+    if (shortDescription) {
+      metafieldsToWrite.push("custom.descricao_curta");
+    }
     if (complement) {
-      await setProductMetafield(ownerId, "descricao_complementar", complement, "multi_line_text_field");
-      logger.info("Mapped descricaoComplementar to metafield", {
-        ownerId,
-        key: "custom.descricao_complementar",
-        type: "multi_line_text_field",
+      metafieldsToWrite.push("custom.descricao_complementar");
+    }
+
+    const payloadSummary = buildPayloadSummary(shopifyPayload, metafieldsToWrite);
+
+    stage = "payload_built";
+    logger.info("product_sync_payload_built", {
+      ...baseContext(),
+      payload_summary: payloadSummary,
+    });
+
+    logger.info("product_sync_image_diagnostics", {
+      ...baseContext(),
+      ...extractedImages.diagnostics,
+      payload_will_include_images: imagesIncluded,
+    });
+
+    if (!imagesIncluded && extractedImages.diagnostics.image_candidates_count > 0) {
+      logger.info("Product sync will proceed without images after filtering", {
+        ...baseContext(),
       });
     }
-  }
 
-  return result;
+    logProductNormalizationDiagnostics(product, shopifyPayload);
+
+    stage = "lookup";
+    logger.info("product_sync_shopify_lookup_start", {
+      ...baseContext(),
+      lookup_key: sku || "no-sku",
+    });
+
+    let existing;
+    try {
+      existing = sku ? await findVariantBySku(sku) : null;
+    } catch (error) {
+      logger.error("product_sync_failure", {
+        ...baseContext(),
+        stage: "lookup",
+        result_stage: "lookup",
+        root_cause_summary: rootCauseSummary(error),
+        ...extractErrorDetails(error),
+      });
+      throw buildStageError("lookup", baseContext(), error);
+    }
+
+    intent = existing?.product?.id ? "update" : "create";
+    handle = normalizeString(existing?.product?.handle ?? handle) || null;
+
+    logger.info("product_sync_shopify_lookup_result", {
+      ...baseContext(),
+      lookup_key: sku || "no-sku",
+      found_existing: Boolean(existing?.product?.id),
+      found_product_id: existing?.product?.id ?? null,
+      found_product_handle: existing?.product?.handle ?? null,
+      chosen_intent: intent,
+    });
+
+    let result;
+    if (intent === "update") {
+      stage = "update";
+      logger.info("product_sync_update_start", {
+        ...baseContext(),
+        target_product_id: existing?.product?.id ?? null,
+      });
+
+      try {
+        result = await updateShopifyProduct(existing.product.id, shopifyPayload);
+        resultStage = "update";
+        handle = normalizeString(result?.product?.handle ?? handle) || null;
+
+        logger.info("product_sync_update_success", {
+          ...baseContext(),
+          shopify_product_id: result?.product?.id ?? existing?.product?.id ?? null,
+          shopify_handle: result?.product?.handle ?? null,
+        });
+      } catch (error) {
+        logger.error("product_sync_update_error", {
+          ...baseContext(),
+          target_product_id: existing?.product?.id ?? null,
+          ...extractErrorDetails(error),
+        });
+
+        logger.error("product_sync_failure", {
+          ...baseContext(),
+          stage: "update",
+          result_stage: "update",
+          root_cause_summary: rootCauseSummary(error),
+          ...extractErrorDetails(error),
+        });
+        throw buildStageError("update", baseContext(), error);
+      }
+    } else {
+      stage = "create";
+      logger.info("product_sync_create_start", {
+        ...baseContext(),
+      });
+
+      try {
+        result = await createShopifyProduct(shopifyPayload);
+        resultStage = "create";
+        handle = normalizeString(result?.product?.handle ?? handle) || null;
+
+        logger.info("product_sync_create_success", {
+          ...baseContext(),
+          shopify_product_id: result?.product?.id ?? null,
+          shopify_handle: result?.product?.handle ?? null,
+        });
+      } catch (error) {
+        logger.error("product_sync_create_error", {
+          ...baseContext(),
+          ...extractErrorDetails(error),
+        });
+
+        logger.error("product_sync_failure", {
+          ...baseContext(),
+          stage: "create",
+          result_stage: "create",
+          root_cause_summary: rootCauseSummary(error),
+          ...extractErrorDetails(error),
+        });
+        throw buildStageError("create", baseContext(), error);
+      }
+    }
+
+    const metafieldUserErrors = [];
+
+    if (result?.product?.id) {
+      const ownerId = existing?.product?.gqlId ?? `gid://shopify/Product/${result.product.id}`;
+
+      if (shortDescription) {
+        stage = "metafield";
+        logger.info("product_sync_metafield_start", {
+          ...baseContext(),
+          metafield_key: "custom.descricao_curta",
+          metafield_type: "single_line_text_field",
+          owner_id: ownerId,
+        });
+
+        try {
+          const response = await setProductMetafield(
+            ownerId,
+            "descricao_curta",
+            shortDescription,
+            "single_line_text_field",
+          );
+
+          const userErrors = response?.metafieldsSet?.userErrors ?? [];
+          if (userErrors.length > 0) {
+            resultStage = "metafield";
+            metafieldUserErrors.push(...userErrors);
+            logger.error("product_sync_metafield_error", {
+              ...baseContext(),
+              metafield_key: "custom.descricao_curta",
+              metafield_type: "single_line_text_field",
+              owner_id: ownerId,
+              error_graphql_user_errors: userErrors,
+              root_cause_summary: "metafield_user_errors",
+            });
+          } else {
+            logger.info("product_sync_metafield_success", {
+              ...baseContext(),
+              metafield_key: "custom.descricao_curta",
+              metafield_type: "single_line_text_field",
+              owner_id: ownerId,
+            });
+          }
+        } catch (error) {
+          resultStage = "metafield";
+          logger.error("product_sync_metafield_error", {
+            ...baseContext(),
+            metafield_key: "custom.descricao_curta",
+            metafield_type: "single_line_text_field",
+            owner_id: ownerId,
+            ...extractErrorDetails(error),
+          });
+
+          logger.error("product_sync_failure", {
+            ...baseContext(),
+            stage: "metafield",
+            result_stage: "metafield",
+            root_cause_summary: rootCauseSummary(error),
+            ...extractErrorDetails(error),
+          });
+          throw buildStageError("metafield", baseContext(), error);
+        }
+      }
+
+      if (complement) {
+        stage = "metafield";
+        logger.info("product_sync_metafield_start", {
+          ...baseContext(),
+          metafield_key: "custom.descricao_complementar",
+          metafield_type: "multi_line_text_field",
+          owner_id: ownerId,
+        });
+
+        try {
+          const response = await setProductMetafield(
+            ownerId,
+            "descricao_complementar",
+            complement,
+            "multi_line_text_field",
+          );
+
+          const userErrors = response?.metafieldsSet?.userErrors ?? [];
+          if (userErrors.length > 0) {
+            resultStage = "metafield";
+            metafieldUserErrors.push(...userErrors);
+            logger.error("product_sync_metafield_error", {
+              ...baseContext(),
+              metafield_key: "custom.descricao_complementar",
+              metafield_type: "multi_line_text_field",
+              owner_id: ownerId,
+              error_graphql_user_errors: userErrors,
+              root_cause_summary: "metafield_user_errors",
+            });
+          } else {
+            logger.info("product_sync_metafield_success", {
+              ...baseContext(),
+              metafield_key: "custom.descricao_complementar",
+              metafield_type: "multi_line_text_field",
+              owner_id: ownerId,
+            });
+          }
+        } catch (error) {
+          resultStage = "metafield";
+          logger.error("product_sync_metafield_error", {
+            ...baseContext(),
+            metafield_key: "custom.descricao_complementar",
+            metafield_type: "multi_line_text_field",
+            owner_id: ownerId,
+            ...extractErrorDetails(error),
+          });
+
+          logger.error("product_sync_failure", {
+            ...baseContext(),
+            stage: "metafield",
+            result_stage: "metafield",
+            root_cause_summary: rootCauseSummary(error),
+            ...extractErrorDetails(error),
+          });
+          throw buildStageError("metafield", baseContext(), error);
+        }
+      }
+    }
+
+    logger.info("product_sync_finish", {
+      ...baseContext(),
+      result_stage: resultStage === "unknown" ? intent : resultStage,
+      metafield_user_errors_count: metafieldUserErrors.length,
+      shopify_product_id: result?.product?.id ?? null,
+    });
+
+    return result;
+  } catch (error) {
+    if (error?.code === "product_sync_failure") {
+      throw error;
+    }
+
+    logger.error("product_sync_failure", {
+      ...baseContext(),
+      stage,
+      result_stage: resultStage === "unknown" ? stage : resultStage,
+      root_cause_summary: rootCauseSummary(error),
+      ...extractErrorDetails(error),
+    });
+
+    throw buildStageError(stage || "unknown", baseContext(), error);
+  }
 }

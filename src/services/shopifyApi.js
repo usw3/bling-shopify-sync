@@ -1,7 +1,7 @@
 import fetch from "node-fetch";
 
 import { createLogger } from "../lib/logger.js";
-import { getShopifyAccessToken, shopifyGraphQL } from "../lib/shopifyAuth.js";
+import { getShopifyAccessToken } from "../lib/shopifyAuth.js";
 
 const logger = createLogger("shopifyApi");
 const DEFAULT_API_VERSION = "2026-01";
@@ -24,6 +24,10 @@ function restUrl(path) {
   return `https://${resolveStoreDomain()}/admin/api/${resolveApiVersion()}/${path}`;
 }
 
+function graphqlUrl() {
+  return `https://${resolveStoreDomain()}/admin/api/${resolveApiVersion()}/graphql.json`;
+}
+
 function baseHeaders(accessToken) {
   return {
     "Content-Type": "application/json",
@@ -40,6 +44,55 @@ function parseJsonSafe(text) {
   }
 }
 
+function summarizeVariables(variables) {
+  if (!variables || typeof variables !== "object") {
+    return null;
+  }
+
+  const summary = {};
+  for (const [key, value] of Object.entries(variables)) {
+    if (Array.isArray(value)) {
+      summary[key] = { type: "array", length: value.length };
+      continue;
+    }
+
+    if (value === null) {
+      summary[key] = { type: "null" };
+      continue;
+    }
+
+    if (typeof value === "object") {
+      summary[key] = { type: "object", keys: Object.keys(value).length };
+      continue;
+    }
+
+    if (typeof value === "string") {
+      summary[key] = { type: "string", length: value.length };
+      continue;
+    }
+
+    summary[key] = { type: typeof value };
+  }
+
+  return summary;
+}
+
+function buildShopifyApiError(message, details) {
+  const error = new Error(message);
+  error.code = "shopify_api_error";
+  error.details = details;
+  error.status = details?.status ?? null;
+  error.statusText = details?.statusText ?? null;
+  error.endpoint = details?.endpoint ?? null;
+  error.method = details?.method ?? null;
+  error.responseBody = details?.responseBody ?? null;
+  error.responseErrors = details?.responseErrors ?? null;
+  error.graphqlErrors = details?.graphqlErrors ?? null;
+  error.graphqlUserErrors = details?.graphqlUserErrors ?? null;
+  error.operationName = details?.operationName ?? null;
+  return error;
+}
+
 async function restRequest(path, method, body) {
   assertConfig();
 
@@ -52,18 +105,39 @@ async function restRequest(path, method, body) {
   });
 
   const text = await response.text();
+  const parsedBody = parseJsonSafe(text);
+  const responseErrors = parsedBody?.errors ?? parsedBody?.error ?? null;
+
   if (!response.ok) {
-    logger.error("Shopify REST API error", { path, status: response.status, body: text });
-    throw new Error("shopify_api_error");
+    logger.error("Shopify REST API error", {
+      endpoint: path,
+      method,
+      status: response.status,
+      statusText: response.statusText,
+      body: text,
+      responseErrors,
+    });
+
+    throw buildShopifyApiError(
+      `Shopify REST request failed (${method} ${path}) status ${response.status} ${response.statusText}`,
+      {
+        endpoint: path,
+        method,
+        status: response.status,
+        statusText: response.statusText,
+        responseBody: text,
+        parsedBody,
+        responseErrors,
+      },
+    );
   }
 
-  const payload = parseJsonSafe(text);
-  if (!payload) {
-    logger.warn("Shopify REST response is not JSON", { path, body: text });
+  if (!parsedBody) {
+    logger.warn("Shopify REST response is not JSON", { endpoint: path, method, body: text });
     return {};
   }
 
-  return payload;
+  return parsedBody;
 }
 
 export async function createShopifyProduct(payload) {
@@ -78,13 +152,54 @@ export async function createShopifyOrder(payload) {
   return restRequest("orders.json", "POST", payload);
 }
 
-async function graphqlRequest(query, variables) {
-  try {
-    return await shopifyGraphQL(query, variables);
-  } catch (error) {
-    logger.error("Shopify GraphQL error", { message: error?.message ?? "unknown_error" });
-    throw new Error("shopify_graphql_error");
+async function graphqlRequest(query, variables, context = {}) {
+  assertConfig();
+
+  const accessToken = await getShopifyAccessToken();
+  const response = await fetch(graphqlUrl(), {
+    method: "POST",
+    headers: baseHeaders(accessToken),
+    body: JSON.stringify({ query, variables }),
+  });
+
+  const text = await response.text();
+  const parsedBody = parseJsonSafe(text) || {};
+  const graphqlErrors = Array.isArray(parsedBody?.errors) ? parsedBody.errors : [];
+
+  const mutationUserErrors =
+    parsedBody?.data?.metafieldsSet?.userErrors ?? parsedBody?.data?.productCreate?.userErrors ?? null;
+
+  if (!response.ok || graphqlErrors.length > 0) {
+    logger.error("Shopify GraphQL error", {
+      endpoint: "graphql.json",
+      method: "POST",
+      status: response.status,
+      statusText: response.statusText,
+      operationName: context.operationName ?? null,
+      variablesSummary: summarizeVariables(variables),
+      graphqlErrors,
+      graphqlUserErrors: mutationUserErrors,
+      body: text,
+    });
+
+    throw buildShopifyApiError(
+      `Shopify GraphQL request failed (${context.operationName ?? "unknown_operation"}) status ${response.status}`,
+      {
+        endpoint: "graphql.json",
+        method: "POST",
+        status: response.status,
+        statusText: response.statusText,
+        responseBody: text,
+        parsedBody,
+        graphqlErrors,
+        graphqlUserErrors: mutationUserErrors,
+        operationName: context.operationName ?? null,
+        variablesSummary: summarizeVariables(variables),
+      },
+    );
   }
+
+  return parsedBody.data ?? {};
 }
 
 function parseNumericIdFromGid(gid) {
@@ -134,6 +249,7 @@ export async function findVariantBySku(sku) {
             product {
               id
               title
+              handle
             }
           }
         }
@@ -142,7 +258,7 @@ export async function findVariantBySku(sku) {
   `;
 
   const variables = { query: `sku:${cleanSku}` };
-  const data = await graphqlRequest(query, variables);
+  const data = await graphqlRequest(query, variables, { operationName: "variantBySku" });
   const node = data?.productVariants?.edges?.[0]?.node;
   if (!node) {
     return null;
@@ -158,6 +274,7 @@ export async function findVariantBySku(sku) {
       id: parseNumericIdFromGid(node.product?.id),
       gqlId: node.product?.id,
       title: node.product?.title,
+      handle: node.product?.handle,
     },
   };
 }
@@ -189,10 +306,17 @@ export async function setProductMetafield(ownerId, key, value, type = "single_li
     ],
   };
 
-  const data = await graphqlRequest(mutation, variables);
-  const errors = data?.metafieldsSet?.userErrors ?? [];
-  if (errors.length) {
-    logger.warn("Shopify metafield warning", { errors, key, type });
+  const data = await graphqlRequest(mutation, variables, { operationName: "metafieldsSet" });
+  const userErrors = data?.metafieldsSet?.userErrors ?? [];
+  if (userErrors.length > 0) {
+    logger.warn("Shopify metafield warning", {
+      operationName: "metafieldsSet",
+      userErrors,
+      key,
+      type,
+      ownerId: ownerGraphqlId,
+      variablesSummary: summarizeVariables(variables),
+    });
   }
 
   return data;
