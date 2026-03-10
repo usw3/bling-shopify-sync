@@ -1,60 +1,53 @@
 import fetch from "node-fetch";
 
 import { createLogger } from "../lib/logger.js";
+import { getShopifyAccessToken, shopifyGraphQL } from "../lib/shopifyAuth.js";
 
 const logger = createLogger("shopifyApi");
-const storeDomain = process.env.SHOPIFY_STORE;
-const accessToken = process.env.SHOPIFY_ADMIN_TOKEN;
-const apiVersion = process.env.SHOPIFY_API_VERSION ?? "2026-01";
+const DEFAULT_API_VERSION = "2026-01";
 
 function assertConfig() {
-  if (!storeDomain) {
+  if (!process.env.SHOPIFY_STORE) {
     throw new Error("missing_shopify_store");
   }
-  if (!accessToken) {
-    throw new Error("missing_shopify_admin_token");
-  }
+}
+
+function resolveStoreDomain() {
+  return process.env.SHOPIFY_STORE.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+}
+
+function resolveApiVersion() {
+  return process.env.SHOPIFY_API_VERSION ?? DEFAULT_API_VERSION;
 }
 
 function restUrl(path) {
-  return `https://${storeDomain}/admin/api/${apiVersion}/${path}`;
+  return `https://${resolveStoreDomain()}/admin/api/${resolveApiVersion()}/${path}`;
 }
 
-function graphqlUrl() {
-  return `https://${storeDomain}/admin/api/${apiVersion}/graphql.json`;
-}
-
-function baseHeaders() {
+function baseHeaders(accessToken) {
   return {
     "Content-Type": "application/json",
+    Accept: "application/json",
     "X-Shopify-Access-Token": accessToken,
   };
 }
 
-function collectArrayFieldPaths(value, currentPath = "payload", result = []) {
-  if (Array.isArray(value)) {
-    result.push(currentPath);
-    value.forEach((item, index) => {
-      collectArrayFieldPaths(item, `${currentPath}[${index}]`, result);
-    });
-    return result;
+function parseJsonSafe(text) {
+  try {
+    return JSON.parse(text);
+  } catch (_error) {
+    return null;
   }
-
-  if (value && typeof value === "object") {
-    Object.entries(value).forEach(([key, child]) => {
-      collectArrayFieldPaths(child, `${currentPath}.${key}`, result);
-    });
-  }
-
-  return result;
 }
 
 async function restRequest(path, method, body) {
   assertConfig();
+
+  const accessToken = await getShopifyAccessToken();
   const url = restUrl(path);
   const response = await fetch(url, {
     method,
-    headers: baseHeaders(),
+    headers: baseHeaders(accessToken),
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -64,29 +57,20 @@ async function restRequest(path, method, body) {
     throw new Error("shopify_api_error");
   }
 
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    logger.warn("Shopify REST response is not JSON", { body: text });
+  const payload = parseJsonSafe(text);
+  if (!payload) {
+    logger.warn("Shopify REST response is not JSON", { path, body: text });
     return {};
   }
+
+  return payload;
 }
 
 export async function createShopifyProduct(payload) {
-  const topLevelKeys = payload && typeof payload === "object" ? Object.keys(payload) : [];
-  const arrayFieldPaths = collectArrayFieldPaths(payload);
-  logger.info("Shopify product payload diagnostics (create)", { topLevelKeys, arrayFieldPaths });
   return restRequest("products.json", "POST", payload);
 }
 
 export async function updateShopifyProduct(productId, payload) {
-  const topLevelKeys = payload && typeof payload === "object" ? Object.keys(payload) : [];
-  const arrayFieldPaths = collectArrayFieldPaths(payload);
-  logger.info("Shopify product payload diagnostics (update)", {
-    productId,
-    topLevelKeys,
-    arrayFieldPaths,
-  });
   return restRequest(`products/${productId}.json`, "PUT", payload);
 }
 
@@ -95,26 +79,19 @@ export async function createShopifyOrder(payload) {
 }
 
 async function graphqlRequest(query, variables) {
-  assertConfig();
-  const response = await fetch(graphqlUrl(), {
-    method: "POST",
-    headers: baseHeaders(),
-    body: JSON.stringify({ query, variables }),
-  });
-
-  const json = await response.json();
-  if (!response.ok || json.errors) {
-    logger.error("Shopify GraphQL error", { errors: json.errors ?? json });
+  try {
+    return await shopifyGraphQL(query, variables);
+  } catch (error) {
+    logger.error("Shopify GraphQL error", { message: error?.message ?? "unknown_error" });
     throw new Error("shopify_graphql_error");
   }
-
-  return json.data;
 }
 
 function parseNumericIdFromGid(gid) {
   if (!gid) {
     return null;
   }
+
   const parts = gid.split("/");
   const rawId = parts.at(-1);
   const id = Number(rawId);
@@ -185,7 +162,7 @@ export async function findVariantBySku(sku) {
   };
 }
 
-export async function setProductMetafield(ownerId, key, value) {
+export async function setProductMetafield(ownerId, key, value, type = "single_line_text_field") {
   const ownerGraphqlId = ensureGraphqlProductId(ownerId);
   if (!ownerGraphqlId) {
     throw new Error("missing_product_owner_id");
@@ -206,7 +183,7 @@ export async function setProductMetafield(ownerId, key, value) {
         ownerId: ownerGraphqlId,
         namespace: "custom",
         key,
-        type: "single_line_text_field",
+        type,
         value,
       },
     ],
@@ -215,7 +192,7 @@ export async function setProductMetafield(ownerId, key, value) {
   const data = await graphqlRequest(mutation, variables);
   const errors = data?.metafieldsSet?.userErrors ?? [];
   if (errors.length) {
-    logger.warn("Shopify metafield warning", { errors });
+    logger.warn("Shopify metafield warning", { errors, key, type });
   }
 
   return data;
