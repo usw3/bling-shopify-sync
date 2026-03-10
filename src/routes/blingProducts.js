@@ -14,6 +14,16 @@ router.post("/", (req, res) => {
   }
 
   const signature = req.get("X-Bling-Signature-256");
+  logger.info("Bling products signature diagnostics", {
+    hasRawBody: Boolean(req.rawBody),
+    rawBodyLength: Buffer.isBuffer(req.rawBody)
+      ? req.rawBody.length
+      : typeof req.rawBody === "string"
+        ? req.rawBody.length
+        : 0,
+    xBlingSignature256: signature ?? null,
+  });
+
   const valid = verifyBlingSignature({
     rawBody: req.rawBody,
     signature,

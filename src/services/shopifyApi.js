@@ -31,6 +31,24 @@ function baseHeaders() {
   };
 }
 
+function collectArrayFieldPaths(value, currentPath = "payload", result = []) {
+  if (Array.isArray(value)) {
+    result.push(currentPath);
+    value.forEach((item, index) => {
+      collectArrayFieldPaths(item, `${currentPath}[${index}]`, result);
+    });
+    return result;
+  }
+
+  if (value && typeof value === "object") {
+    Object.entries(value).forEach(([key, child]) => {
+      collectArrayFieldPaths(child, `${currentPath}.${key}`, result);
+    });
+  }
+
+  return result;
+}
+
 async function restRequest(path, method, body) {
   assertConfig();
   const url = restUrl(path);
@@ -55,10 +73,20 @@ async function restRequest(path, method, body) {
 }
 
 export async function createShopifyProduct(payload) {
+  const topLevelKeys = payload && typeof payload === "object" ? Object.keys(payload) : [];
+  const arrayFieldPaths = collectArrayFieldPaths(payload);
+  logger.info("Shopify product payload diagnostics (create)", { topLevelKeys, arrayFieldPaths });
   return restRequest("products.json", "POST", payload);
 }
 
 export async function updateShopifyProduct(productId, payload) {
+  const topLevelKeys = payload && typeof payload === "object" ? Object.keys(payload) : [];
+  const arrayFieldPaths = collectArrayFieldPaths(payload);
+  logger.info("Shopify product payload diagnostics (update)", {
+    productId,
+    topLevelKeys,
+    arrayFieldPaths,
+  });
   return restRequest(`products/${productId}.json`, "PUT", payload);
 }
 

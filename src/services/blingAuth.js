@@ -24,6 +24,57 @@ function parseJsonSafe(rawBody) {
   }
 }
 
+function sanitizeSensitiveValue(key, value) {
+  const loweredKey = String(key || "").toLowerCase();
+  const isSensitive =
+    loweredKey === "client_secret" ||
+    loweredKey === "access_token" ||
+    loweredKey === "refresh_token" ||
+    loweredKey.endsWith("_token");
+
+  if (!isSensitive) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return previewToken(value);
+  }
+
+  return "[masked]";
+}
+
+function sanitizeForLogs(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeForLogs(item));
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const sanitized = {};
+  for (const [key, currentValue] of Object.entries(value)) {
+    if (currentValue && typeof currentValue === "object") {
+      sanitized[key] = sanitizeForLogs(currentValue);
+      continue;
+    }
+
+    sanitized[key] = sanitizeSensitiveValue(key, currentValue);
+  }
+
+  return sanitized;
+}
+
+function logTokenExchangeFailure({ status, responseBody, params }) {
+  logger.warn("Bling token exchange diagnostics", {
+    status,
+    responseBody,
+    hasCode: Boolean(params?.code),
+    hasClientId: Boolean(process.env.BLING_CLIENT_ID),
+    hasClientSecret: Boolean(process.env.BLING_CLIENT_SECRET),
+  });
+}
+
 function getRequiredEnv(name) {
   const value = process.env[name];
   if (!value) {
@@ -67,43 +118,53 @@ export function buildBlingBasicAuth() {
 }
 
 async function requestToken(params) {
-  const response = await fetch(BLING_TOKEN_ENDPOINT, {
-    method: "POST",
-    headers: {
-      Authorization: buildBlingBasicAuth(),
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
-      "enable-jwt": "1",
-    },
-    body: new URLSearchParams(params).toString(),
-  });
+  let status = null;
+  let safeResponseBody = null;
+  let hasLoggedFailure = false;
 
-  const responseText = await response.text();
-  const responseBody = parseJsonSafe(responseText);
-
-  if (!response.ok) {
-    logger.warn("Bling token endpoint returned non-success status", {
-      status: response.status,
-      grantType: params.grant_type,
-      responseBody,
-      hasCode: Boolean(params.code),
-      hasClientId: Boolean(process.env.BLING_CLIENT_ID),
-      hasClientSecret: Boolean(process.env.BLING_CLIENT_SECRET),
+  try {
+    const response = await fetch(BLING_TOKEN_ENDPOINT, {
+      method: "POST",
+      headers: {
+        Authorization: buildBlingBasicAuth(),
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+        "enable-jwt": "1",
+      },
+      body: new URLSearchParams(params).toString(),
     });
 
-    throw new Error(
-      `Bling token exchange failed (status ${response.status}): ${JSON.stringify(responseBody)}`,
-    );
+    status = response.status;
+
+    const responseText = await response.text();
+    const responseBody = parseJsonSafe(responseText);
+    safeResponseBody = sanitizeForLogs(responseBody);
+
+    if (!response.ok) {
+      logTokenExchangeFailure({ status, responseBody: safeResponseBody, params });
+      hasLoggedFailure = true;
+
+      throw new Error(
+        `Bling token exchange failed (status ${status}): ${JSON.stringify(safeResponseBody)}`,
+      );
+    }
+
+    const normalized = normalizeTokenPayload(responseBody);
+    if (!normalized.access_token || !normalized.refresh_token) {
+      logTokenExchangeFailure({ status, responseBody: safeResponseBody, params });
+      hasLoggedFailure = true;
+      throw new Error(`Bling token exchange returned incomplete payload: ${JSON.stringify(safeResponseBody)}`);
+    }
+
+    updateTokenCache(normalized);
+    return normalized;
+  } catch (error) {
+    if (!hasLoggedFailure) {
+      logTokenExchangeFailure({ status, responseBody: safeResponseBody, params });
+    }
+
+    throw error;
   }
-
-  const normalized = normalizeTokenPayload(responseBody);
-  if (!normalized.access_token || !normalized.refresh_token) {
-    throw new Error(`Bling token exchange returned incomplete payload: ${JSON.stringify(responseBody)}`);
-  }
-
-  updateTokenCache(normalized);
-
-  return normalized;
 }
 
 export async function exchangeBlingCodeForToken(code) {
