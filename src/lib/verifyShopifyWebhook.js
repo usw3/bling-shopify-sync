@@ -20,35 +20,36 @@ function normalizeRawBody(rawBody) {
   }
 }
 
-function normalizeHexSignature(signature) {
+function normalizeBase64Signature(signature) {
   if (typeof signature !== "string") {
     return null;
   }
 
-  const cleanSignature = signature.startsWith("sha256=") ? signature.slice(7) : signature;
-
-  if (!cleanSignature || !/^[a-fA-F0-9]+$/.test(cleanSignature)) {
-    return false;
-  }
-
-  return cleanSignature.toLowerCase();
+  const cleanSignature = signature.trim();
+  return cleanSignature || null;
 }
 
-export function verifyBlingSignature({ rawBody, signature, secret }) {
+export function verifyShopifyWebhook({ rawBody, signature, secret }) {
   if (!rawBody || !signature || !secret) {
     return false;
   }
 
   const payloadBuffer = normalizeRawBody(rawBody);
-  const normalizedSignature = normalizeHexSignature(signature);
+  const normalizedSignature = normalizeBase64Signature(signature);
 
   if (!payloadBuffer || !normalizedSignature) {
     return false;
   }
 
-  const expectedDigest = crypto.createHmac("sha256", secret).update(payloadBuffer).digest("hex");
-  const expectedBuffer = Buffer.from(expectedDigest, "hex");
-  const signatureBuffer = Buffer.from(normalizedSignature, "hex");
+  const expectedDigest = crypto.createHmac("sha256", secret).update(payloadBuffer).digest("base64");
+  const expectedBuffer = Buffer.from(expectedDigest, "base64");
+
+  let signatureBuffer;
+  try {
+    signatureBuffer = Buffer.from(normalizedSignature, "base64");
+  } catch (_error) {
+    return false;
+  }
 
   if (signatureBuffer.length !== expectedBuffer.length) {
     return false;

@@ -2,22 +2,36 @@ import { Router } from "express";
 
 import { createLogger } from "../lib/logger.js";
 import { verifyBlingSignature } from "../lib/verifyBlingSignature.js";
-import { syncInvoiceFromBlingEvent } from "../services/syncInvoice.js";
 
 const router = Router();
 const logger = createLogger("blingInvoices");
 
 router.post("/", (req, res) => {
-  if (!verifyBlingSignature(req)) {
-    logger.warn("Invalid Bling invoice signature", { headers: req.headers });
+  const secret = process.env.BLING_WEBHOOK_SECRET;
+  if (!secret) {
+    logger.warn("Bling invoices webhook secret is missing");
+    return res.status(503).json({ error: "missing_bling_webhook_secret" });
+  }
+
+  const signature = req.get("X-Bling-Signature-256");
+  const valid = verifyBlingSignature({
+    rawBody: req.rawBody,
+    signature,
+    secret,
+  });
+
+  if (!valid) {
+    logger.warn("Invalid Bling invoices signature");
     return res.status(401).json({ error: "invalid_signature" });
   }
 
-  res.status(200).json({ received: true });
+  logger.info("Bling invoices webhook received", {
+    eventType: req.get("X-Bling-Event") || req.get("X-Bling-Event-Type") || "unknown",
+  });
 
-  const eventType = req.headers["x-bling-event"] ?? req.headers["x-bling-event-type"] ?? "invoice_change";
-  void syncInvoiceFromBlingEvent(req.body, { eventType }).catch((error) => {
-    logger.error("Failed to sync Bling invoice", { error, eventType, payload: req.body });
+  return res.status(200).json({
+    ok: true,
+    source: "bling_invoices",
   });
 });
 

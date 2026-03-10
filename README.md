@@ -1,78 +1,92 @@
 # Bling Shopify Sync
 
-Middleware that bridges Bling webhooks with Shopify webhooks so products, invoices, and orders stay aligned without persisting state locally.
+Safe middleware skeleton for Bling <-> Shopify integrations, ready to run on Railway.
 
-## Local development
-1. `npm install`
-2. Copy `.env.example` to `.env` and fill in the credentials for Bling and Shopify attacks.
-3. `npm start` to listen for requests on `PORT` (default 3000).
-4. Expose the server via tools like `ngrok` when testing Bling or Shopify webhooks locally.
+This patch is intentionally minimal and production-safe:
+- stable Express boot
+- quick health endpoints
+- webhook routes with signature validation stubs
+- Shopify token utility via client credentials grant
+- no database, no queues, no background jobs, and no sync side effects yet
 
-## Webhook surface
-- `GET /` — health/status check returning a timestamp.
-- `POST /webhooks/bling/products` — handles product create/update/delete events from Bling.
-- `POST /webhooks/bling/invoices` — handles emitted notas fiscais.
-- `POST /webhooks/shopify/orders-create` — catches `orders/create` events.
-- `POST /webhooks/shopify/orders-updated` — catches `orders/updated` events.
-- `POST /webhooks/shopify/orders-cancelled` — catches `orders/cancelled` events.
-
-Every webhook validates the secret against `x-bling-event`/`x-shopify-hmac-sha256` headers, logs the event, and responds with `200` before delegating to the async sync handlers.
-
-## Sync responsibilities
-- `syncProductFromBlingEvent` turns a Bling product payload into a Shopify product (or updates the existing one when a SKU matches). It also maps `descricaoComplementar`/`complemento` into the `custom.descricao_complementar` metafield so the extra descriptive text survives the move to Shopify.
-- `syncOrderFromShopifyEvent` converts Shopify `orders/*` payloads into Bling invoice creation requests and skips invoices when cancellations arrive. This is where you would eventually update or cancel the Bling nota fiscal to mirror Shopify.
-- `syncInvoiceFromBlingEvent` creates or updates Shopify orders from Bling nota fiscal data and is ready to be extended with fulfillment reconciliation.
-
-## Shopify helpers
-- `findVariantBySku` performs a GraphQL `productVariants` search on the Shopify store to locate an existing variant/product before deciding to create or update anything.
-- `setProductMetafield` issues a GraphQL `metafieldsSet` mutation to persist `descricaoComplementar` in `custom.descricao_complementar` for the Shopify product.
-
-Example GraphQL mutation for the metafield:
-
-```graphql
-mutation setDescriptionMetafield {
-  metafieldsSet(
-    metafields: [
-      {
-        ownerId: "gid://shopify/Product/1234567890"
-        namespace: "custom"
-        key: "descricao_complementar"
-        type: "single_line_text_field"
-        value: "Texto complementar vindo do Bling"
-      }
-    ]
-  ) {
-    metafields {
-      id
-      namespace
-      key
-    }
-    userErrors {
-      field
-      message
-    }
-  }
-}
-```
+## Local run
+1. Install dependencies:
+   - `npm install`
+2. Create local env file:
+   - `cp .env.example .env`
+3. Start server:
+   - `npm start`
+4. Test health routes:
+   - `GET /`
+   - `GET /health`
 
 ## Railway deployment
-Railway can run this project with a simple `npm start`. Set the following environment variables in Railway (matching `.env.example`) before deploying:
-- `PORT`
+Railway compatibility is preserved:
+- app binds to host `0.0.0.0`
+- app reads port from `process.env.PORT` (with local fallback to `3000`)
+- startup does not depend on external API calls
+
+Required on Railway:
+- Public networking enabled
+- Healthcheck path set to `/health` (or `/`)
+- Environment variables configured (see `.env.example`)
+
+## Environment variables
+From `.env.example`:
+- `PORT` (default local: `3000`)
+- `BLING_CLIENT_ID`
+- `BLING_CLIENT_SECRET`
 - `BLING_ACCESS_TOKEN`
+- `BLING_REFRESH_TOKEN`
 - `BLING_WEBHOOK_SECRET`
-- `BLING_API_URL` (optional override)
 - `SHOPIFY_STORE`
-- `SHOPIFY_ADMIN_TOKEN`
+- `SHOPIFY_CLIENT_ID`
+- `SHOPIFY_CLIENT_SECRET`
 - `SHOPIFY_WEBHOOK_SECRET`
-- `SHOPIFY_API_VERSION` (defaults to `2026-01`)
+- `SHOPIFY_API_VERSION` (default: `2026-01`)
 
-Steps to deploy with Railway:
-1. `railway login`
-2. `railway init` (choose a project or create a new one).
-3. Push the repository and set the required environment variables via the Railway dashboard or `railway env` commands.
-4. `railway up` to start the service.
+## Public routes
+- `GET /`
+  - returns `{ service, status, timestamp }`
+- `GET /health`
+  - returns `{ status: "ok" }`
+- `GET /bling/oauth`
+  - exchanges Bling `?code=` for OAuth tokens and returns masked token previews
+- `GET /debug/bling-auth`
+  - resolves a valid Bling access token using in-memory cache + automatic refresh (debug only)
+- `POST /webhooks/bling/products`
+- `POST /webhooks/bling/invoices`
+- `POST /webhooks/shopify/orders-create`
+- `POST /webhooks/shopify/orders-updated`
+- `POST /webhooks/shopify/orders-cancelled`
 
-## Next steps
-- Implement retries and queueing for the outbound API calls in case the downstream services are unavailable.
-- Add automated tests for the signature validators and sync helpers.
-- Extend the reconciliation strategy so Bling invoices can update Shopify fulfillment/order status and vice versa.
+## Webhook signature headers
+- Bling routes validate `X-Bling-Signature-256`
+- Shopify routes validate `X-Shopify-Hmac-Sha256`
+
+If required webhook secrets are missing, routes fail gracefully with readable `503` errors. Invalid signatures return `401`.
+
+## Shopify auth utility
+`src/lib/shopifyAuth.js` provides:
+- `getShopifyAccessToken()`
+  - obtains token via client credentials grant
+  - caches token in memory with expiration
+  - refreshes automatically when expired
+- `shopifyGraphQL(query, variables)`
+  - fetches token automatically
+  - calls Shopify GraphQL Admin API
+  - throws readable errors without exposing secrets
+
+## Current scope
+This repository is now a safe middleware base.
+
+It does **not** perform full Bling/Shopify synchronization yet.
+
+## Bling OAuth helper
+1. Open your Bling app authorization/invite link.
+2. After approving, Bling redirects to `GET /bling/oauth?code=...`.
+3. The middleware exchanges the code for tokens automatically, seeds in-memory cache, and keeps refresh token available.
+4. Automatic refresh happens when token expiry is near (`getValidBlingAccessToken` refreshes if needed).
+5. Test refresh/cached access token resolution at `GET /debug/bling-auth`.
+6. Token values returned by endpoints are masked previews only; full tokens are never returned.
+7. For now, token cache is in memory only (no database persistence yet).

@@ -5,7 +5,9 @@ import { createLogger } from "./src/lib/logger.js";
 import { attachRawBody } from "./src/lib/rawBody.js";
 import blingProductsRouter from "./src/routes/blingProducts.js";
 import blingInvoicesRouter from "./src/routes/blingInvoices.js";
+import debugBlingRouter from "./src/routes/debugBling.js";
 import shopifyOrdersRouter from "./src/routes/shopifyOrders.js";
+import { exchangeBlingCodeForToken, previewToken } from "./src/services/blingAuth.js";
 
 dotenv.config();
 
@@ -30,17 +32,50 @@ app.get("/health", (_req, res) => {
 });
 
 app.get("/bling/oauth", (req, res) => {
-  const code = typeof req.query.code === "string" ? req.query.code : null;
-  res.status(200).json({
-    ok: true,
-    message: code ? "Bling OAuth callback received." : "Bling OAuth callback reached without code.",
-    code,
-  });
+  const code = typeof req.query.code === "string" ? req.query.code : "";
+  if (!code) {
+    return res.status(400).json({ error: "missing_code" });
+  }
+
+  logger.info("Bling OAuth callback received", { receivedCode: true });
+
+  return exchangeBlingCodeForToken(code)
+    .then((tokenData) => {
+      const accessPreview = previewToken(tokenData.access_token);
+      const refreshPreview = previewToken(tokenData.refresh_token);
+
+      logger.info("Bling OAuth token exchange succeeded", {
+        tokenType: tokenData.token_type,
+        expiresIn: tokenData.expires_in,
+        accessTokenPreview: accessPreview,
+        refreshTokenPreview: refreshPreview,
+      });
+
+      return res.status(200).json({
+        ok: true,
+        provider: "bling",
+        received_code: true,
+        token_type: tokenData.token_type,
+        expires_in: tokenData.expires_in,
+        scope: tokenData.scope,
+        access_token_preview: accessPreview,
+        refresh_token_preview: refreshPreview,
+      });
+    })
+    .catch((error) => {
+      logger.warn("Bling OAuth token exchange failed");
+
+      return res.status(502).json({
+        error: "bling_token_exchange_failed",
+        message: error?.message ?? "Unknown error while exchanging authorization code",
+      });
+    });
 });
 
 app.use("/webhooks/bling/products", blingProductsRouter);
 app.use("/webhooks/bling/invoices", blingInvoicesRouter);
 app.use("/webhooks/shopify", shopifyOrdersRouter);
+app.use("/debug/bling-auth", debugBlingRouter);
 
 app.use((error, _req, res, _next) => {
   logger.error("Unhandled request error", {

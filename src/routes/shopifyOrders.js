@@ -1,8 +1,7 @@
 import { Router } from "express";
 
 import { createLogger } from "../lib/logger.js";
-import { verifyShopifySignature } from "../lib/verifyShopifySignature.js";
-import { syncOrderFromShopifyEvent } from "../services/syncOrder.js";
+import { verifyShopifyWebhook } from "../lib/verifyShopifyWebhook.js";
 
 const router = Router();
 const logger = createLogger("shopifyOrders");
@@ -15,17 +14,30 @@ const handlers = [
 
 handlers.forEach(({ path, eventType }) => {
   router.post(path, (req, res) => {
-    if (!verifyShopifySignature(req)) {
-      logger.warn("Invalid Shopify signature", { headers: req.headers, eventType });
+    const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+    if (!secret) {
+      logger.warn("Shopify webhook secret is missing", { eventType });
+      return res.status(503).json({ error: "missing_shopify_webhook_secret" });
+    }
+
+    const signature = req.get("X-Shopify-Hmac-Sha256");
+    const valid = verifyShopifyWebhook({
+      rawBody: req.rawBody,
+      signature,
+      secret,
+    });
+
+    if (!valid) {
+      logger.warn("Invalid Shopify webhook signature", { eventType });
       return res.status(401).json({ error: "invalid_signature" });
     }
 
-    res.status(200).json({ received: true });
-
-    logger.info("Shopify webhook received", { eventType });
-    void syncOrderFromShopifyEvent(req.body, { eventType }).catch((error) => {
-      logger.error("Failed to sync Shopify order", { error, eventType, payload: req.body });
+    logger.info("Shopify webhook received", {
+      topic: eventType,
+      webhookTopicHeader: req.get("X-Shopify-Topic") || null,
     });
+
+    return res.status(200).json({ ok: true, topic: eventType });
   });
 });
 
