@@ -7,6 +7,10 @@ app.get("/", (_req, res) => {
   res.status(200).json({ status: "ok" });
 });
 
+app.get("/health", (_req, res) => {
+  res.status(200).json({ status: "ok" });
+});
+
 app.get("/bling/oauth", (req, res) => {
   console.log("GET /bling/oauth recebido", req.query);
   res.status(200).send("OK OAUTH");
