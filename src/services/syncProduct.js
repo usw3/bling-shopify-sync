@@ -3,6 +3,7 @@ import {
   createShopifyProduct,
   updateShopifyProduct,
   findVariantBySku,
+  findProductByMetafield,
   setProductMetafield,
 } from "./shopifyApi.js";
 
@@ -684,7 +685,8 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
     throw new Error("missing_product_payload");
   }
 
-  const sourceProductId = normalizeSku(product.id ?? product.codigo ?? product.codigoBling ?? product.sku) || "no-id";
+  const blingId = normalizeSku(product.id ?? product.codigoBling ?? product.codigo);
+  const sourceProductId = blingId || normalizeSku(product.sku) || "no-id";
   const sku = normalizeSku(product.codigo ?? product.sku ?? product.codigoBling ?? product.id);
   const syncTraceId = buildSyncTraceId(sourceProductId, sku);
   const shopDomain = normalizeString(process.env.SHOPIFY_STORE).replace(/^https?:\/\//, "") || null;
@@ -743,6 +745,9 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
     if (complement) {
       metafieldsToWrite.push("custom.descricao_complementar");
     }
+    if (blingId) {
+      metafieldsToWrite.push("custom.bling_id");
+    }
 
     const payloadSummary = buildPayloadSummary(shopifyPayload, metafieldsToWrite);
 
@@ -769,12 +774,15 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
     stage = "lookup";
     logger.info("product_sync_shopify_lookup_start", {
       ...baseContext(),
-      lookup_key: sku || "no-sku",
+      lookup_key: sku || (blingId ? `bling_id:${blingId}` : "no-sku"),
     });
 
     let existing;
     try {
       existing = sku ? await findVariantBySku(sku) : null;
+      if (!existing?.product?.id && blingId) {
+        existing = await findProductByMetafield("custom", "bling_id", blingId);
+      }
     } catch (error) {
       logger.error("product_sync_failure", {
         ...baseContext(),
@@ -791,7 +799,7 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
 
     logger.info("product_sync_shopify_lookup_result", {
       ...baseContext(),
-      lookup_key: sku || "no-sku",
+      lookup_key: sku || (blingId ? `bling_id:${blingId}` : "no-sku"),
       found_existing: Boolean(existing?.product?.id),
       found_product_id: existing?.product?.id ?? null,
       found_product_handle: existing?.product?.handle ?? null,
@@ -971,6 +979,58 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
             ...baseContext(),
             metafield_key: "custom.descricao_complementar",
             metafield_type: "multi_line_text_field",
+            owner_id: ownerId,
+            ...extractErrorDetails(error),
+          });
+
+          logger.error("product_sync_failure", {
+            ...baseContext(),
+            stage: "metafield",
+            result_stage: "metafield",
+            root_cause_summary: rootCauseSummary(error),
+            ...extractErrorDetails(error),
+          });
+          throw buildStageError("metafield", baseContext(), error);
+        }
+      }
+
+      if (blingId) {
+        stage = "metafield";
+        logger.info("product_sync_metafield_start", {
+          ...baseContext(),
+          metafield_key: "custom.bling_id",
+          metafield_type: "single_line_text_field",
+          owner_id: ownerId,
+        });
+
+        try {
+          const response = await setProductMetafield(ownerId, "bling_id", blingId, "single_line_text_field");
+          const userErrors = response?.metafieldsSet?.userErrors ?? [];
+          if (userErrors.length > 0) {
+            resultStage = "metafield";
+            metafieldUserErrors.push(...userErrors);
+            logger.error("product_sync_metafield_error", {
+              ...baseContext(),
+              metafield_key: "custom.bling_id",
+              metafield_type: "single_line_text_field",
+              owner_id: ownerId,
+              error_graphql_user_errors: userErrors,
+              root_cause_summary: "metafield_user_errors",
+            });
+          } else {
+            logger.info("product_sync_metafield_success", {
+              ...baseContext(),
+              metafield_key: "custom.bling_id",
+              metafield_type: "single_line_text_field",
+              owner_id: ownerId,
+            });
+          }
+        } catch (error) {
+          resultStage = "metafield";
+          logger.error("product_sync_metafield_error", {
+            ...baseContext(),
+            metafield_key: "custom.bling_id",
+            metafield_type: "single_line_text_field",
             owner_id: ownerId,
             ...extractErrorDetails(error),
           });
