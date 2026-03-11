@@ -234,6 +234,17 @@ function normalizeSku(value) {
   return normalized;
 }
 
+function normalizeBarcode(value) {
+  const normalized = normalizeString(value);
+  const lowered = normalized.toLowerCase();
+
+  if (!normalized || lowered === "[object object]" || lowered === "array" || lowered === "object") {
+    return "";
+  }
+
+  return normalized;
+}
+
 function ensureNumber(value) {
   const number = Number(value ?? 0);
   return Number.isNaN(number) ? 0 : number;
@@ -450,6 +461,7 @@ function buildShopifyPayload(product, images = []) {
     product.product_type ?? product.tipo ?? product.categoria ?? product.categorias,
   );
   const sku = normalizeSku(product.codigo ?? product.sku ?? product.codigoBling ?? product.id);
+  const barcode = normalizeBarcode(extractBarcode(product));
   const payload = {
     product: {
       title,
@@ -466,6 +478,10 @@ function buildShopifyPayload(product, images = []) {
       ],
     },
   };
+
+  if (barcode) {
+    payload.product.variants[0].barcode = barcode;
+  }
 
   if (Array.isArray(images) && images.length > 0) {
     payload.product.images = images;
@@ -496,6 +512,10 @@ function applyFinalPayloadGuard(payload, product) {
   firstVariant.sku = normalizeSku(firstVariant.sku);
   firstVariant.price = normalizePrice(firstVariant.price);
   firstVariant.inventory_quantity = ensureNumber(firstVariant.inventory_quantity);
+  firstVariant.barcode = normalizeBarcode(firstVariant.barcode);
+  if (!firstVariant.barcode) {
+    delete firstVariant.barcode;
+  }
 
   guardedProduct.variants = [firstVariant];
   const safeImages = coerceImages(guardedProduct.images);
@@ -527,6 +547,18 @@ function extractComplement(product) {
     product.descricaoExtra ??
     product.complemento ??
     product.complemento_descricao ??
+    null
+  );
+}
+
+function extractBarcode(product) {
+  return (
+    product.codigoBarras ??
+    product.codigo_barras ??
+    product.codigoDeBarras ??
+    product.gtin ??
+    product.ean ??
+    product.barcode ??
     null
   );
 }
@@ -610,6 +642,7 @@ function buildPayloadSummary(payload, metafieldsToWrite = []) {
     variant_count: variants.length,
     first_variant_sku: normalizeSku(firstVariant.sku),
     first_variant_price: normalizePrice(firstVariant.price),
+    first_variant_barcode: normalizeBarcode(firstVariant.barcode),
     metafields_to_write: metafieldsToWrite,
   };
 }
@@ -640,6 +673,8 @@ function logProductNormalizationDiagnostics(product, payload) {
   const productPayload = payload?.product ?? {};
   const variants = Array.isArray(productPayload.variants) ? productPayload.variants : [];
   const firstVariant = variants[0] ?? {};
+  const shortDescription = normalizeString(extractShortDescription(product));
+  const complement = normalizeString(extractComplement(product));
 
   logger.info("product_sync_normalization_diagnostics", {
     productId: normalizeSku(product?.id ?? product?.codigo ?? product?.sku ?? product?.codigoBling),
@@ -648,6 +683,7 @@ function logProductNormalizationDiagnostics(product, payload) {
       descricao: describeType(product?.descricao ?? product?.description),
       descricao_curta: describeType(extractShortDescription(product)),
       descricao_complementar: describeType(product?.descricaoComplementar ?? product?.descricao_complementar),
+      codigo_barras: describeType(extractBarcode(product)),
       marca_vendor: describeType(product?.marca ?? product?.vendor ?? product?.fabricante ?? product?.brand),
       tags: describeType(product?.tags ?? product?.tag ?? product?.etiquetas ?? product?.labels),
       product_type: describeType(product?.product_type ?? product?.tipo ?? product?.categoria ?? product?.categorias),
@@ -665,6 +701,9 @@ function logProductNormalizationDiagnostics(product, payload) {
       tags: normalizeString(productPayload.tags),
       sku: normalizeSku(firstVariant.sku),
       price: normalizePrice(firstVariant.price),
+      barcode: normalizeBarcode(firstVariant.barcode),
+      descricao_curta_preview: shortDescription.slice(0, 120),
+      descricao_complementar_preview: complement.slice(0, 120),
       image_count: Array.isArray(productPayload.images) ? productPayload.images.length : 0,
       variant_count: variants.length,
     },

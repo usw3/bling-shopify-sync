@@ -279,6 +279,47 @@ export async function findVariantBySku(sku) {
   };
 }
 
+export async function findProductByMetafield(namespace, key, value) {
+  if (!namespace || !key || !value) {
+    return null;
+  }
+
+  const cleanValue = value.toString().trim();
+  if (!cleanValue) {
+    return null;
+  }
+
+  const query = `
+    query productByMetafield($query: String!) {
+      products(first: 1, query: $query) {
+        edges {
+          node {
+            id
+            title
+            handle
+          }
+        }
+      }
+    }
+  `;
+
+  const variables = { query: `metafield:${namespace}.${key}:${cleanValue}` };
+  const data = await graphqlRequest(query, variables, { operationName: "productByMetafield" });
+  const node = data?.products?.edges?.[0]?.node;
+  if (!node) {
+    return null;
+  }
+
+  return {
+    product: {
+      id: parseNumericIdFromGid(node.id),
+      gqlId: node.id,
+      title: node.title,
+      handle: node.handle,
+    },
+  };
+}
+
 export async function setProductMetafield(ownerId, key, value, type = "single_line_text_field") {
   const ownerGraphqlId = ensureGraphqlProductId(ownerId);
   if (!ownerGraphqlId) {
