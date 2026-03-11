@@ -15,11 +15,10 @@ dotenv.config();
 const app = express();
 const logger = createLogger("server");
 const port = Number(process.env.PORT) || 3000;
-
-app.use("/debug/project", debugProjectRouter);
 app.disable("x-powered-by");
 app.use(express.json({ verify: attachRawBody, limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, verify: attachRawBody, limit: "1mb" }));
+app.use("/debug/project", debugProjectRouter);
 
 app.get("/", (_req, res) => {
   res.status(200).json({
@@ -39,6 +38,8 @@ app.get("/bling/oauth", (req, res) => {
     return res.status(400).json({ error: "missing_code" });
   }
 
+  const allowOAuthDebug = process.env.BLING_OAUTH_DEBUG === "1";
+
   logger.info("Bling OAuth callback received", { receivedCode: true });
 
   return exchangeBlingCodeForToken(code)
@@ -53,7 +54,11 @@ app.get("/bling/oauth", (req, res) => {
         refreshTokenPreview: refreshPreview,
       });
 
-      return res.status(200).json({
+      if (allowOAuthDebug) {
+        logger.warn("Bling OAuth debug is enabled; returning full tokens in response");
+      }
+
+      const responsePayload = {
         ok: true,
         provider: "bling",
         received_code: true,
@@ -62,7 +67,14 @@ app.get("/bling/oauth", (req, res) => {
         scope: tokenData.scope,
         access_token_preview: accessPreview,
         refresh_token_preview: refreshPreview,
-      });
+      };
+
+      if (allowOAuthDebug) {
+        responsePayload.access_token = tokenData.access_token;
+        responsePayload.refresh_token = tokenData.refresh_token;
+      }
+
+      return res.status(200).json(responsePayload);
     })
     .catch((error) => {
       logger.warn("Bling OAuth token exchange failed");
