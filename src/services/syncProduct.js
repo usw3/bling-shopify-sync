@@ -8,23 +8,56 @@ import {
 
 const logger = createLogger("syncProduct");
 
-function extractProduct(payload) {
-  const resolvedPayload = (() => {
-    const data = payload?.data;
-    if (typeof data === "string") {
-      try {
-        return JSON.parse(data);
-      } catch (_error) {
-        return payload;
+function parseEventData(data) {
+  if (data === null || data === undefined) {
+    return null;
+  }
+
+  if (typeof data === "string") {
+    const trimmed = data.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === "object") {
+        return parsed;
       }
+      return { id: parsed };
+    } catch (_error) {
+      // fall through to URLSearchParams
     }
 
-    if (data && typeof data === "object") {
-      return data;
-    }
+    try {
+      const params = new URLSearchParams(trimmed);
+      if ([...params.keys()].length === 0) {
+        return { id: trimmed };
+      }
 
-    return payload;
-  })();
+      const parsedParams = {};
+      for (const [key, value] of params.entries()) {
+        try {
+          parsedParams[key] = JSON.parse(value);
+        } catch (_error) {
+          parsedParams[key] = value;
+        }
+      }
+      return parsedParams;
+    } catch (_error) {
+      return { id: trimmed };
+    }
+  }
+
+  if (typeof data === "object") {
+    return data;
+  }
+
+  return { id: data };
+}
+
+function extractProduct(payload) {
+  const resolvedPayload = parseEventData(payload?.data) ?? payload;
 
   const extracted =
     resolvedPayload?.produto ??
