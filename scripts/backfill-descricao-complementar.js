@@ -171,8 +171,12 @@ async function resolveShopifyProduct({ blingId, sku }) {
 }
 
 async function backfill() {
-  if (!BLING_ACCESS_TOKEN) {
-    throw new Error("missing BLING_ACCESS_TOKEN");
+  if (!blingAccessToken && !BLING_REFRESH_TOKEN) {
+    throw new Error("missing_bling_access_or_refresh_token");
+  }
+
+  if (!blingAccessToken && BLING_REFRESH_TOKEN) {
+    await refreshBlingAccessToken();
   }
 
   log("Backfill started", {
