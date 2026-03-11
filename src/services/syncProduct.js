@@ -9,12 +9,29 @@ import {
 const logger = createLogger("syncProduct");
 
 function extractProduct(payload) {
+  const resolvedPayload = (() => {
+    const data = payload?.data;
+    if (typeof data === "string") {
+      try {
+        return JSON.parse(data);
+      } catch (_error) {
+        return payload;
+      }
+    }
+
+    if (data && typeof data === "object") {
+      return data;
+    }
+
+    return payload;
+  })();
+
   const extracted =
-    payload?.produto ??
-    payload?.produtos?.produto ??
-    payload?.product ??
-    payload?.products?.product ??
-    payload;
+    resolvedPayload?.produto ??
+    resolvedPayload?.produtos?.produto ??
+    resolvedPayload?.product ??
+    resolvedPayload?.products?.product ??
+    resolvedPayload;
 
   if (Array.isArray(extracted)) {
     return extracted[0] ?? null;
