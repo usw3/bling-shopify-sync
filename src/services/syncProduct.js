@@ -1,5 +1,6 @@
 import { createLogger } from "../lib/logger.js";
 import {
+  archiveShopifyProduct,
   createShopifyProduct,
   updateShopifyProduct,
   findVariantBySku,
@@ -525,6 +526,12 @@ function applyFinalPayloadGuard(payload, product) {
     delete guardedProduct.images;
   }
 
+  const hasImages = Array.isArray(guardedProduct.images) && guardedProduct.images.length > 0;
+  const hasCategory = Boolean(normalizeString(guardedProduct.product_type));
+  if (!hasImages || !hasCategory) {
+    guardedProduct.status = "draft";
+  }
+
   guarded.product = guardedProduct;
   return guarded;
 }
@@ -638,6 +645,7 @@ function buildPayloadSummary(payload, metafieldsToWrite = []) {
     product_type: normalizeString(productPayload.product_type),
     tags: normalizeString(productPayload.tags),
     handle: normalizeString(productPayload.handle) || null,
+    status: normalizeString(productPayload.status) || null,
     images_count: Array.isArray(productPayload.images) ? productPayload.images.length : 0,
     variant_count: variants.length,
     first_variant_sku: normalizeSku(firstVariant.sku),
@@ -713,14 +721,13 @@ function logProductNormalizationDiagnostics(product, payload) {
 
 export async function syncProductFromBlingEvent(payload, meta = {}) {
   const eventType = meta.eventType ?? "product_change";
-  if (eventType.toLowerCase().includes("excl")) {
-    logger.info("Product delete request received", { eventType, payload });
-    // TODO: remove Shopify product when Bling reports deletion
-    return;
-  }
-
+  const isDeleteEvent = eventType.toLowerCase().includes("excl");
   const product = extractProduct(payload);
   if (!product) {
+    if (isDeleteEvent) {
+      logger.warn("Product delete request missing payload", { eventType });
+      return { stage: "archive", archived: false, reason: "missing_product_payload" };
+    }
     throw new Error("missing_product_payload");
   }
 
@@ -748,6 +755,47 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
       handle,
       intent,
     });
+
+  if (isDeleteEvent) {
+    logger.info("product_sync_archive_start", {
+      ...baseContext(),
+      event_type: eventType,
+    });
+
+    try {
+      let existing = sku ? await findVariantBySku(sku) : null;
+      if (!existing?.product?.id && blingId) {
+        existing = await findProductByMetafield("custom", "bling_id", blingId);
+      }
+
+      if (!existing?.product?.id) {
+        logger.info("product_sync_archive_not_found", {
+          ...baseContext(),
+          lookup_key: sku || (blingId ? `bling_id:${blingId}` : "no-sku"),
+        });
+        return { stage: "archive", archived: false, reason: "not_found" };
+      }
+
+      await archiveShopifyProduct(existing.product.id);
+      logger.info("product_sync_archive_success", {
+        ...baseContext(),
+        shopify_product_id: existing.product.id,
+        shopify_handle: existing.product.handle ?? null,
+      });
+
+      return {
+        stage: "archive",
+        archived: true,
+        shopify_product_id: existing.product.id,
+      };
+    } catch (error) {
+      logger.error("product_sync_archive_error", {
+        ...baseContext(),
+        ...extractErrorDetails(error),
+      });
+      throw buildStageError("archive", baseContext(), error);
+    }
+  }
 
   logger.info("product_sync_start", {
     ...baseContext(),

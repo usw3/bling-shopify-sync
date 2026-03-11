@@ -148,6 +148,18 @@ export async function updateShopifyProduct(productId, payload) {
   return restRequest(`products/${productId}.json`, "PUT", payload);
 }
 
+export async function archiveShopifyProduct(productId) {
+  const numericId = Number(productId);
+  const resolvedId = Number.isFinite(numericId) ? numericId : productId;
+
+  return restRequest(`products/${resolvedId}.json`, "PUT", {
+    product: {
+      id: resolvedId,
+      status: "archived",
+    },
+  });
+}
+
 export async function createShopifyOrder(payload) {
   return restRequest("orders.json", "POST", payload);
 }
