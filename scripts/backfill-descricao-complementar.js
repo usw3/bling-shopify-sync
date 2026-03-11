@@ -4,7 +4,10 @@ import fetch from "node-fetch";
 import { findProductByMetafield, findVariantBySku, setProductMetafield } from "../src/services/shopifyApi.js";
 
 const BLING_API_BASE = process.env.BLING_API_BASE ?? "https://api.bling.com.br/Api/v3";
-const BLING_ACCESS_TOKEN = process.env.BLING_ACCESS_TOKEN ?? "";
+let blingAccessToken = process.env.BLING_ACCESS_TOKEN ?? "";
+const BLING_CLIENT_ID = process.env.BLING_CLIENT_ID ?? "";
+const BLING_CLIENT_SECRET = process.env.BLING_CLIENT_SECRET ?? "";
+const BLING_REFRESH_TOKEN = process.env.BLING_REFRESH_TOKEN ?? "";
 const PAGE_LIMIT = Number(process.env.BLING_PAGE_LIMIT ?? process.env.BLING_LIMIT ?? 100);
 const MAX_PAGES = Number(process.env.BLING_MAX_PAGES ?? 0);
 const MAX_ITEMS = Number(process.env.BLING_MAX_ITEMS ?? 0);
@@ -41,6 +44,51 @@ function normalizeSku(value) {
   return normalized;
 }
 
+function parseJsonSafe(text) {
+  try {
+    return JSON.parse(text);
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function refreshBlingAccessToken() {
+  if (!BLING_CLIENT_ID || !BLING_CLIENT_SECRET || !BLING_REFRESH_TOKEN) {
+    throw new Error("missing_bling_refresh_credentials");
+  }
+
+  const basic = Buffer.from(`${BLING_CLIENT_ID}:${BLING_CLIENT_SECRET}`).toString("base64");
+  const response = await fetch(`${BLING_API_BASE}/oauth/token`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${basic}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+      "enable-jwt": "1",
+    },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: BLING_REFRESH_TOKEN,
+    }).toString(),
+  });
+
+  const text = await response.text();
+  const parsed = parseJsonSafe(text);
+  if (!response.ok) {
+    const errorType = parsed?.error?.type ?? null;
+    throw new Error(`bling_refresh_failed status ${response.status} type ${errorType ?? "unknown"}`);
+  }
+
+  const accessToken = parsed?.access_token ?? "";
+  if (!accessToken) {
+    throw new Error("bling_refresh_missing_access_token");
+  }
+
+  blingAccessToken = accessToken;
+  log("Bling access token refreshed", { hasToken: true });
+  return accessToken;
+}
+
 function extractComplement(product) {
   return (
     product?.descricaoComplementar ??
@@ -61,37 +109,47 @@ function extractSku(product) {
 }
 
 async function fetchBlingPage(page) {
+  if (!blingAccessToken && BLING_REFRESH_TOKEN) {
+    await refreshBlingAccessToken();
+  }
+
   const url = new URL(`${BLING_API_BASE}/produtos`);
   if (PAGE_LIMIT > 0) {
     url.searchParams.set("limite", String(PAGE_LIMIT));
   }
   url.searchParams.set("pagina", String(page));
 
-  const response = await fetch(url.toString(), {
-    headers: {
-      Authorization: `Bearer ${BLING_ACCESS_TOKEN}`,
-      Accept: "application/json",
-    },
-  });
+  const doRequest = async () => {
+    const response = await fetch(url.toString(), {
+      headers: {
+        Authorization: `Bearer ${blingAccessToken}`,
+        Accept: "application/json",
+      },
+    });
 
-  const text = await response.text();
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (_error) {
-    parsed = null;
+    const text = await response.text();
+    const parsed = parseJsonSafe(text);
+    return { response, text, parsed };
+  };
+
+  let { response, text, parsed } = await doRequest();
+
+  if (!response.ok) {
+    const errorType = parsed?.error?.type ?? null;
+    if (response.status === 401 && errorType === "invalid_token" && BLING_REFRESH_TOKEN) {
+      log("Bling access token invalid, attempting refresh", { status: response.status });
+      await refreshBlingAccessToken();
+      ({ response, text, parsed } = await doRequest());
+    }
   }
 
   if (!response.ok) {
-    throw new Error(`Bling API error ${response.status}: ${text}`);
+    const errorType = parsed?.error?.type ?? null;
+    throw new Error(`Bling API error ${response.status} type ${errorType ?? "unknown"}`);
   }
 
   const data = parsed?.data ?? parsed?.produtos ?? [];
-  if (Array.isArray(data)) {
-    return data;
-  }
-
-  return [];
+  return Array.isArray(data) ? data : [];
 }
 
 async function resolveShopifyProduct({ blingId, sku }) {
