@@ -4,7 +4,8 @@
 "type": "module",
 "scripts": {
 "start": "node server.js",
-"inspect:project": "node scripts/inspect-project.js"
+"inspect:project": "node scripts/inspect-project.js",
+"backfill:descricao-complementar": "node scripts/backfill-descricao-complementar.js"
 },
 "dependencies": {
 "express": "^4.19.2",
