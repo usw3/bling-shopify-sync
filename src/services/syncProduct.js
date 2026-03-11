@@ -526,12 +526,6 @@ function applyFinalPayloadGuard(payload, product) {
     delete guardedProduct.images;
   }
 
-  const hasImages = Array.isArray(guardedProduct.images) && guardedProduct.images.length > 0;
-  const hasCategory = Boolean(normalizeString(guardedProduct.product_type));
-  if (!hasImages || !hasCategory) {
-    guardedProduct.status = "draft";
-  }
-
   guarded.product = guardedProduct;
   return guarded;
 }
@@ -891,6 +885,21 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
       found_product_id: existing?.product?.id ?? null,
       found_product_handle: existing?.product?.handle ?? null,
       chosen_intent: intent,
+    });
+
+    const hasImages = Array.isArray(shopifyPayload?.product?.images) && shopifyPayload.product.images.length > 0;
+    const hasCategory = Boolean(normalizeString(shopifyPayload?.product?.product_type));
+    let appliedStatus = null;
+    if (intent === "create" && (!hasImages || !hasCategory)) {
+      shopifyPayload.product.status = "draft";
+      appliedStatus = "draft";
+    }
+
+    logger.info("product_sync_status_decision", {
+      ...baseContext(),
+      has_images: hasImages,
+      has_category: hasCategory,
+      applied_status: appliedStatus,
     });
 
     let result;
