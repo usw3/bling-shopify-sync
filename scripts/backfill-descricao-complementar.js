@@ -13,6 +13,8 @@ const MAX_PAGES = Number(process.env.BLING_MAX_PAGES ?? 0);
 const MAX_ITEMS = Number(process.env.BLING_MAX_ITEMS ?? 0);
 const DELAY_MS = Number(process.env.BLING_BACKFILL_DELAY_MS ?? 0);
 const COMPLEMENT_TYPE = process.env.SHOPIFY_COMPLEMENT_TYPE ?? "multi_line_text_field";
+const DETAIL_FALLBACK = process.env.BLING_DETAIL_FALLBACK !== "0";
+const DETAIL_DELAY_MS = Number(process.env.BLING_DETAIL_DELAY_MS ?? 0);
 const DRY_RUN = process.env.DRY_RUN === "1";
 
 function log(message, meta) {
@@ -152,6 +154,33 @@ async function fetchBlingPage(page) {
   return Array.isArray(data) ? data : [];
 }
 
+async function fetchBlingProductById(id) {
+  if (!blingAccessToken && BLING_REFRESH_TOKEN) {
+    await refreshBlingAccessToken();
+  }
+
+  const url = `${BLING_API_BASE}/produtos/${id}`;
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${blingAccessToken}`,
+      Accept: "application/json",
+    },
+  });
+
+  const text = await response.text();
+  const parsed = parseJsonSafe(text);
+  if (!response.ok) {
+    const errorType = parsed?.error?.type ?? null;
+    throw new Error(`Bling API detail error ${response.status} type ${errorType ?? "unknown"}`);
+  }
+
+  const data = parsed?.data ?? parsed?.produto ?? parsed?.product ?? parsed ?? null;
+  if (data && data.produto) {
+    return data.produto;
+  }
+  return data;
+}
+
 async function resolveShopifyProduct({ blingId, sku }) {
   if (blingId) {
     const byBlingId = await findProductByMetafield("custom", "bling_id", blingId);
@@ -194,6 +223,8 @@ async function backfill() {
   let skipped = 0;
   let notFound = 0;
   let errors = 0;
+  let detailFetches = 0;
+  let detailErrors = 0;
 
   while (true) {
     if (MAX_PAGES && page > MAX_PAGES) {
@@ -213,10 +244,27 @@ async function backfill() {
       const product = item?.produto ?? item?.product ?? item;
       const blingId = extractProductId(product);
       const sku = extractSku(product);
-      const complementRaw = extractComplement(product);
-      const complement = normalizeString(complementRaw);
+      let complementRaw = extractComplement(product);
+      let complement = normalizeString(complementRaw);
 
       processed += 1;
+
+      if (!complement) {
+        if (DETAIL_FALLBACK && blingId) {
+          try {
+            detailFetches += 1;
+            const detailProduct = await fetchBlingProductById(blingId);
+            complementRaw = extractComplement(detailProduct);
+            complement = normalizeString(complementRaw);
+            if (DETAIL_DELAY_MS > 0) {
+              await sleep(DETAIL_DELAY_MS);
+            }
+          } catch (error) {
+            detailErrors += 1;
+            log("detail fetch error", { blingId, sku, message: error?.message ?? String(error) });
+          }
+        }
+      }
 
       if (!complement) {
         skipped += 1;
@@ -278,6 +326,8 @@ async function backfill() {
     skipped,
     notFound,
     errors,
+    detailFetches,
+    detailErrors,
   });
 }
 
