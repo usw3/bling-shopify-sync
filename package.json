@@ -5,7 +5,8 @@
 "scripts": {
 "start": "node server.js",
 "inspect:project": "node scripts/inspect-project.js",
-"backfill:descricao-complementar": "node scripts/backfill-descricao-complementar.js"
+"backfill:descricao-complementar": "node scripts/backfill-descricao-complementar.js",
+"backfill:bling-id": "node scripts/backfill-bling-id.js"
 },
 "dependencies": {
 "express": "^4.19.2",

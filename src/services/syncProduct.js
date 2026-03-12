@@ -1,3 +1,5 @@
+import fetch from "node-fetch";
+
 import { createLogger } from "../lib/logger.js";
 import {
   archiveShopifyProduct,
@@ -7,6 +9,7 @@ import {
   findProductByMetafield,
   setProductMetafield,
 } from "./shopifyApi.js";
+import { getValidBlingAccessToken } from "./blingAuth.js";
 
 const logger = createLogger("syncProduct");
 
@@ -552,6 +555,37 @@ function extractComplement(product) {
   );
 }
 
+function parseJsonSafe(text) {
+  try {
+    return JSON.parse(text);
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function fetchBlingProductDetail(blingId) {
+  const accessToken = await getValidBlingAccessToken();
+  const response = await fetch(`https://api.bling.com.br/Api/v3/produtos/${blingId}`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+    },
+  });
+
+  const text = await response.text();
+  const parsed = parseJsonSafe(text);
+  if (!response.ok) {
+    const errorType = parsed?.error?.type ?? null;
+    throw new Error(`bling_detail_failed status ${response.status} type ${errorType ?? "unknown"}`);
+  }
+
+  const data = parsed?.data ?? parsed?.produto ?? parsed?.product ?? parsed ?? null;
+  if (data && data.produto) {
+    return data.produto;
+  }
+  return data;
+}
+
 function extractBarcode(product) {
   return (
     product.codigoBarras ??
@@ -818,7 +852,28 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
     handle = normalizeString(shopifyPayload?.product?.handle ?? handle) || null;
 
     const shortDescription = normalizeString(extractShortDescription(product));
-    const complement = normalizeString(extractComplement(product));
+    let complement = normalizeString(extractComplement(product));
+    if (!complement && blingId) {
+      try {
+        logger.info("product_sync_complement_detail_fetch_start", {
+          ...baseContext(),
+          bling_id: blingId,
+        });
+        const detailProduct = await fetchBlingProductDetail(blingId);
+        complement = normalizeString(extractComplement(detailProduct));
+        logger.info("product_sync_complement_detail_fetch_result", {
+          ...baseContext(),
+          bling_id: blingId,
+          has_complement: Boolean(complement),
+        });
+      } catch (error) {
+        logger.warn("product_sync_complement_detail_fetch_error", {
+          ...baseContext(),
+          bling_id: blingId,
+          error_message: error?.message ?? "detail_fetch_failed",
+        });
+      }
+    }
     const metafieldsToWrite = [];
     if (shortDescription) {
       metafieldsToWrite.push("custom.descricao_curta");
@@ -890,7 +945,7 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
     const hasImages = Array.isArray(shopifyPayload?.product?.images) && shopifyPayload.product.images.length > 0;
     const hasCategory = Boolean(normalizeString(shopifyPayload?.product?.product_type));
     let appliedStatus = null;
-    if (intent === "create" && (!hasImages || !hasCategory)) {
+    if (intent === "create" && (!hasImages && !hasCategory)) {
       shopifyPayload.product.status = "draft";
       appliedStatus = "draft";
     }
