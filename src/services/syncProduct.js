@@ -4,6 +4,9 @@ import { createLogger } from "../lib/logger.js";
 import {
   archiveShopifyProduct,
   createShopifyProduct,
+  getShopifyLocationId,
+  getShopifyProduct,
+  setInventoryLevel,
   updateShopifyProduct,
   findVariantBySku,
   findProductByMetafield,
@@ -478,6 +481,7 @@ function buildShopifyPayload(product, images = []) {
           sku,
           price: normalizePrice(product.precoVenda ?? product.preco ?? product.price),
           inventory_quantity: ensureNumber(product.quantidade ?? product.estoque ?? 0),
+          inventory_management: "shopify",
         },
       ],
     },
@@ -516,6 +520,7 @@ function applyFinalPayloadGuard(payload, product) {
   firstVariant.sku = normalizeSku(firstVariant.sku);
   firstVariant.price = normalizePrice(firstVariant.price);
   firstVariant.inventory_quantity = ensureNumber(firstVariant.inventory_quantity);
+  firstVariant.inventory_management = "shopify";
   firstVariant.barcode = normalizeBarcode(firstVariant.barcode);
   if (!firstVariant.barcode) {
     delete firstVariant.barcode;
@@ -596,6 +601,12 @@ function extractBarcode(product) {
     product.barcode ??
     null
   );
+}
+
+function extractInventoryItemId(productResponse) {
+  const product = productResponse?.product ?? productResponse ?? {};
+  const variants = Array.isArray(product.variants) ? product.variants : [];
+  return variants[0]?.inventory_item_id ?? null;
 }
 
 function buildSyncTraceId(sourceProductId, sku) {
@@ -1021,6 +1032,39 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
           ...extractErrorDetails(error),
         });
         throw buildStageError("create", baseContext(), error);
+      }
+    }
+
+    const inventoryQuantity = ensureNumber(product.quantidade ?? product.estoque ?? 0);
+    if (Number.isFinite(inventoryQuantity)) {
+      stage = "inventory";
+      logger.info("product_sync_inventory_start", {
+        ...baseContext(),
+        available: inventoryQuantity,
+      });
+
+      try {
+        let inventoryItemId = extractInventoryItemId(result);
+        if (!inventoryItemId && result?.product?.id) {
+          const fetched = await getShopifyProduct(result.product.id);
+          inventoryItemId = extractInventoryItemId(fetched);
+        }
+
+        const locationId = await getShopifyLocationId();
+        await setInventoryLevel(inventoryItemId, inventoryQuantity, locationId);
+
+        logger.info("product_sync_inventory_success", {
+          ...baseContext(),
+          inventory_item_id: inventoryItemId,
+          location_id: locationId,
+          available: inventoryQuantity,
+        });
+      } catch (error) {
+        logger.error("product_sync_inventory_error", {
+          ...baseContext(),
+          available: inventoryQuantity,
+          ...extractErrorDetails(error),
+        });
       }
     }
 

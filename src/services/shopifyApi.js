@@ -5,6 +5,7 @@ import { getShopifyAccessToken } from "../lib/shopifyAuth.js";
 
 const logger = createLogger("shopifyApi");
 const DEFAULT_API_VERSION = "2026-01";
+let cachedLocationId = null;
 
 function assertConfig() {
   if (!process.env.SHOPIFY_STORE) {
@@ -148,6 +149,10 @@ export async function updateShopifyProduct(productId, payload) {
   return restRequest(`products/${productId}.json`, "PUT", payload);
 }
 
+export async function getShopifyProduct(productId) {
+  return restRequest(`products/${productId}.json`, "GET");
+}
+
 export async function archiveShopifyProduct(productId) {
   const numericId = Number(productId);
   const resolvedId = Number.isFinite(numericId) ? numericId : productId;
@@ -162,6 +167,40 @@ export async function archiveShopifyProduct(productId) {
 
 export async function createShopifyOrder(payload) {
   return restRequest("orders.json", "POST", payload);
+}
+
+export async function getShopifyLocationId() {
+  const envLocationId = process.env.SHOPIFY_LOCATION_ID;
+  if (envLocationId) {
+    return Number.isNaN(Number(envLocationId)) ? envLocationId : Number(envLocationId);
+  }
+
+  if (cachedLocationId) {
+    return cachedLocationId;
+  }
+
+  const response = await restRequest("locations.json", "GET");
+  const locations = response?.locations ?? [];
+  const activeLocation = locations.find((location) => location?.active) ?? locations[0];
+  if (!activeLocation?.id) {
+    throw new Error("missing_shopify_location");
+  }
+
+  cachedLocationId = activeLocation.id;
+  return cachedLocationId;
+}
+
+export async function setInventoryLevel(inventoryItemId, available, locationId) {
+  if (!inventoryItemId) {
+    throw new Error("missing_inventory_item_id");
+  }
+
+  const resolvedLocationId = locationId ?? (await getShopifyLocationId());
+  return restRequest("inventory_levels/set.json", "POST", {
+    location_id: resolvedLocationId,
+    inventory_item_id: inventoryItemId,
+    available,
+  });
 }
 
 async function graphqlRequest(query, variables, context = {}) {
