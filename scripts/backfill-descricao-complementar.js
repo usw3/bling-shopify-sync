@@ -2,12 +2,10 @@ import "dotenv/config";
 import fetch from "node-fetch";
 
 import { findProductByMetafield, findVariantBySku, setProductMetafield } from "../src/services/shopifyApi.js";
+import { getValidBlingAccessToken } from "../src/services/blingAuth.js";
 
 const BLING_API_BASE = process.env.BLING_API_BASE ?? "https://api.bling.com.br/Api/v3";
-let blingAccessToken = process.env.BLING_ACCESS_TOKEN ?? "";
-const BLING_CLIENT_ID = process.env.BLING_CLIENT_ID ?? "";
-const BLING_CLIENT_SECRET = process.env.BLING_CLIENT_SECRET ?? "";
-const BLING_REFRESH_TOKEN = process.env.BLING_REFRESH_TOKEN ?? "";
+let blingAccessToken = "";
 const PAGE_LIMIT = Number(process.env.BLING_PAGE_LIMIT ?? process.env.BLING_LIMIT ?? 100);
 const MAX_PAGES = Number(process.env.BLING_MAX_PAGES ?? 0);
 const MAX_ITEMS = Number(process.env.BLING_MAX_ITEMS ?? 0);
@@ -55,40 +53,9 @@ function parseJsonSafe(text) {
 }
 
 async function refreshBlingAccessToken() {
-  if (!BLING_CLIENT_ID || !BLING_CLIENT_SECRET || !BLING_REFRESH_TOKEN) {
-    throw new Error("missing_bling_refresh_credentials");
-  }
-
-  const basic = Buffer.from(`${BLING_CLIENT_ID}:${BLING_CLIENT_SECRET}`).toString("base64");
-  const response = await fetch(`${BLING_API_BASE}/oauth/token`, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${basic}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
-      "enable-jwt": "1",
-    },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: BLING_REFRESH_TOKEN,
-    }).toString(),
-  });
-
-  const text = await response.text();
-  const parsed = parseJsonSafe(text);
-  if (!response.ok) {
-    const errorType = parsed?.error?.type ?? null;
-    throw new Error(`bling_refresh_failed status ${response.status} type ${errorType ?? "unknown"}`);
-  }
-
-  const accessToken = parsed?.access_token ?? "";
-  if (!accessToken) {
-    throw new Error("bling_refresh_missing_access_token");
-  }
-
-  blingAccessToken = accessToken;
+  blingAccessToken = await getValidBlingAccessToken();
   log("Bling access token refreshed", { hasToken: true });
-  return accessToken;
+  return blingAccessToken;
 }
 
 function extractComplement(product) {
@@ -111,7 +78,7 @@ function extractSku(product) {
 }
 
 async function fetchBlingPage(page) {
-  if (!blingAccessToken && BLING_REFRESH_TOKEN) {
+  if (!blingAccessToken) {
     await refreshBlingAccessToken();
   }
 
@@ -138,7 +105,7 @@ async function fetchBlingPage(page) {
 
   if (!response.ok) {
     const errorType = parsed?.error?.type ?? null;
-    if (response.status === 401 && errorType === "invalid_token" && BLING_REFRESH_TOKEN) {
+    if (response.status === 401 && errorType === "invalid_token") {
       log("Bling access token invalid, attempting refresh", { status: response.status });
       await refreshBlingAccessToken();
       ({ response, text, parsed } = await doRequest());
@@ -155,7 +122,7 @@ async function fetchBlingPage(page) {
 }
 
 async function fetchBlingProductById(id) {
-  if (!blingAccessToken && BLING_REFRESH_TOKEN) {
+  if (!blingAccessToken) {
     await refreshBlingAccessToken();
   }
 
@@ -200,13 +167,7 @@ async function resolveShopifyProduct({ blingId, sku }) {
 }
 
 async function backfill() {
-  if (!blingAccessToken && !BLING_REFRESH_TOKEN) {
-    throw new Error("missing_bling_access_or_refresh_token");
-  }
-
-  if (!blingAccessToken && BLING_REFRESH_TOKEN) {
-    await refreshBlingAccessToken();
-  }
+  await refreshBlingAccessToken();
 
   log("Backfill started", {
     apiBase: BLING_API_BASE,

@@ -2,9 +2,10 @@ import "dotenv/config";
 import fetch from "node-fetch";
 
 import { findVariantBySku, getShopifyProduct, setInventoryItemMeasurements } from "../src/services/shopifyApi.js";
+import { getValidBlingAccessToken } from "../src/services/blingAuth.js";
 
 const BLING_API_BASE = process.env.BLING_API_BASE ?? "https://api.bling.com.br/Api/v3";
-const accessToken = process.env.BLING_ACCESS_TOKEN ?? "";
+let accessToken = "";
 const pageLimit = Number(process.env.BLING_PAGE_LIMIT ?? 100);
 const maxItems = Number(process.env.BLING_MAX_ITEMS ?? 0);
 const delayMs = Number(process.env.BLING_BACKFILL_DELAY_MS ?? 150);
@@ -57,7 +58,7 @@ async function sleep() {
 }
 
 async function run() {
-  if (!accessToken) throw new Error("missing_BLING_ACCESS_TOKEN");
+  accessToken = await getValidBlingAccessToken();
   log("started", { dryRun, maxItems: maxItems || null, pageLimit });
   let page = 1;
   let processed = 0;

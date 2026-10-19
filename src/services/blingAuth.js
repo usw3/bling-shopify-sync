@@ -1,16 +1,60 @@
 import fetch from "node-fetch";
+import fs from "node:fs";
+import path from "node:path";
 
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("blingAuth");
 const BLING_TOKEN_ENDPOINT = "https://www.bling.com.br/Api/v3/oauth/token";
 const TOKEN_REFRESH_SAFETY_WINDOW_MS = 60 * 1000;
+const TOKEN_STORE_PATH = process.env.BLING_TOKEN_STORE_PATH || path.join(process.cwd(), ".bling-token-cache.json");
 
 const tokenCache = {
   currentAccessToken: null,
   currentRefreshToken: null,
   expiresAt: 0,
 };
+
+function persistTokenCache() {
+  if (!tokenCache.currentAccessToken || !tokenCache.currentRefreshToken) {
+    return;
+  }
+
+  try {
+    fs.writeFileSync(
+      TOKEN_STORE_PATH,
+      JSON.stringify({
+        access_token: tokenCache.currentAccessToken,
+        refresh_token: tokenCache.currentRefreshToken,
+        expires_at: tokenCache.expiresAt,
+      }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    fs.chmodSync(TOKEN_STORE_PATH, 0o600);
+  } catch (error) {
+    logger.warn("Unable to persist Bling token cache", { message: error?.message ?? "unknown_error" });
+  }
+}
+
+function restorePersistedTokenCache() {
+  if (tokenCache.currentAccessToken || tokenCache.currentRefreshToken) {
+    return;
+  }
+
+  try {
+    const saved = JSON.parse(fs.readFileSync(TOKEN_STORE_PATH, "utf8"));
+    if (saved?.access_token && saved?.refresh_token) {
+      tokenCache.currentAccessToken = saved.access_token;
+      tokenCache.currentRefreshToken = saved.refresh_token;
+      tokenCache.expiresAt = Number(saved.expires_at) || 0;
+      logger.info("Restored Bling token cache from local store");
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      logger.warn("Unable to restore Bling token cache", { message: error?.message ?? "unknown_error" });
+    }
+  }
+}
 
 function parseJsonSafe(rawBody) {
   if (!rawBody) {
@@ -100,6 +144,7 @@ function updateTokenCache(tokenData) {
 
   const expiresInSeconds = Number(tokenData.expires_in) || 0;
   tokenCache.expiresAt = Date.now() + Math.max(0, expiresInSeconds) * 1000;
+  persistTokenCache();
 }
 
 export function previewToken(token) {
@@ -210,6 +255,7 @@ export async function refreshBlingToken(refreshToken) {
 }
 
 export async function getValidBlingAccessToken() {
+  restorePersistedTokenCache();
   const now = Date.now();
   const hasValidCachedToken =
     Boolean(tokenCache.currentAccessToken) && tokenCache.expiresAt - now >= TOKEN_REFRESH_SAFETY_WINDOW_MS;
