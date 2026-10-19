@@ -11,6 +11,7 @@ import {
   findVariantBySku,
   findProductByMetafield,
   setProductMetafield,
+  setInventoryItemWeight,
 } from "./shopifyApi.js";
 import { getValidBlingAccessToken } from "./blingAuth.js";
 
@@ -255,6 +256,48 @@ function normalizeBarcode(value) {
 function ensureNumber(value) {
   const number = Number(value ?? 0);
   return Number.isNaN(number) ? 0 : number;
+}
+
+function normalizeMeasurement(value) {
+  const raw = normalizeString(value).replace(/\s+/g, "").replace(",", ".");
+  if (!raw) {
+    return null;
+  }
+
+  const number = Number(raw);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function extractShippingMeasurements(product) {
+  const dimensions = product?.dimensoes ?? product?.dimensao ?? product?.dimensions ?? {};
+  const read = (...values) => {
+    for (const value of values) {
+      const normalized = normalizeMeasurement(value);
+      if (normalized !== null) {
+        return normalized;
+      }
+    }
+    return null;
+  };
+
+  return {
+    // Bling stores product weights in kilograms. Prefer gross weight because it
+    // represents the item as shipped; fall back to net weight when necessary.
+    weightKg: read(product?.pesoBruto, product?.peso_bruto, product?.peso, product?.weight, product?.pesoLiquido, product?.peso_liquido),
+    height: read(dimensions?.altura, dimensions?.height, product?.altura, product?.height),
+    width: read(dimensions?.largura, dimensions?.width, product?.largura, product?.width),
+    depth: read(
+      dimensions?.profundidade,
+      dimensions?.comprimento,
+      dimensions?.length,
+      dimensions?.depth,
+      product?.profundidade,
+      product?.comprimento,
+      product?.length,
+      product?.depth,
+    ),
+    unit: normalizeString(dimensions?.unidadeMedida ?? dimensions?.unidade ?? product?.unidadeMedida ?? product?.unidade) || "cm",
+  };
 }
 
 function describeType(value) {
@@ -857,6 +900,7 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
     const extractedImages = extractImages(product);
     const rawPayload = buildShopifyPayload(product, extractedImages.images);
     const shopifyPayload = applyFinalPayloadGuard(rawPayload, product);
+    const shippingMeasurements = extractShippingMeasurements(product);
 
     imagesIncluded = Array.isArray(shopifyPayload?.product?.images) && shopifyPayload.product.images.length > 0;
     normalizedTitle = normalizeString(shopifyPayload?.product?.title) || null;
@@ -895,6 +939,22 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
     if (blingId) {
       metafieldsToWrite.push("custom.bling_id");
     }
+    if (shippingMeasurements.height !== null) {
+      metafieldsToWrite.push("custom.altura");
+    }
+    if (shippingMeasurements.width !== null) {
+      metafieldsToWrite.push("custom.largura");
+    }
+    if (shippingMeasurements.depth !== null) {
+      metafieldsToWrite.push("custom.comprimento");
+    }
+    if (
+      shippingMeasurements.height !== null ||
+      shippingMeasurements.width !== null ||
+      shippingMeasurements.depth !== null
+    ) {
+      metafieldsToWrite.push("custom.unidade_dimensoes");
+    }
 
     const payloadSummary = buildPayloadSummary(shopifyPayload, metafieldsToWrite);
 
@@ -902,6 +962,7 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
     logger.info("product_sync_payload_built", {
       ...baseContext(),
       payload_summary: payloadSummary,
+      shipping_measurements: shippingMeasurements,
     });
 
     logger.info("product_sync_image_diagnostics", {
@@ -1035,6 +1096,7 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
       }
     }
 
+    let inventoryItemId = null;
     const inventoryQuantity = ensureNumber(product.quantidade ?? product.estoque ?? 0);
     if (Number.isFinite(inventoryQuantity)) {
       stage = "inventory";
@@ -1044,7 +1106,7 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
       });
 
       try {
-        let inventoryItemId = extractInventoryItemId(result);
+        inventoryItemId = extractInventoryItemId(result);
         if (!inventoryItemId && result?.product?.id) {
           const fetched = await getShopifyProduct(result.product.id);
           inventoryItemId = extractInventoryItemId(fetched);
@@ -1065,6 +1127,34 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
           available: inventoryQuantity,
           ...extractErrorDetails(error),
         });
+      }
+    }
+
+    if (shippingMeasurements.weightKg !== null) {
+      stage = "weight";
+      logger.info("product_sync_weight_start", {
+        ...baseContext(),
+        weight_kg: shippingMeasurements.weightKg,
+      });
+
+      try {
+        if (!inventoryItemId && result?.product?.id) {
+          const fetched = await getShopifyProduct(result.product.id);
+          inventoryItemId = extractInventoryItemId(fetched);
+        }
+        await setInventoryItemWeight(inventoryItemId, shippingMeasurements.weightKg);
+        logger.info("product_sync_weight_success", {
+          ...baseContext(),
+          inventory_item_id: inventoryItemId,
+          weight_kg: shippingMeasurements.weightKg,
+        });
+      } catch (error) {
+        logger.error("product_sync_weight_error", {
+          ...baseContext(),
+          weight_kg: shippingMeasurements.weightKg,
+          ...extractErrorDetails(error),
+        });
+        throw buildStageError("weight", baseContext(), error);
       }
     }
 
@@ -1235,6 +1325,62 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
             stage: "metafield",
             result_stage: "metafield",
             root_cause_summary: rootCauseSummary(error),
+            ...extractErrorDetails(error),
+          });
+          throw buildStageError("metafield", baseContext(), error);
+        }
+      }
+
+      const dimensionMetafields = [
+        { key: "altura", value: shippingMeasurements.height },
+        { key: "largura", value: shippingMeasurements.width },
+        { key: "comprimento", value: shippingMeasurements.depth },
+      ].filter((field) => field.value !== null);
+
+      if (dimensionMetafields.length > 0) {
+        dimensionMetafields.push({ key: "unidade_dimensoes", value: shippingMeasurements.unit, type: "single_line_text_field" });
+      }
+
+      for (const field of dimensionMetafields) {
+        stage = "metafield";
+        const type = field.type ?? "number_decimal";
+        const value = String(field.value);
+        logger.info("product_sync_metafield_start", {
+          ...baseContext(),
+          metafield_key: `custom.${field.key}`,
+          metafield_type: type,
+          owner_id: ownerId,
+        });
+
+        try {
+          const response = await setProductMetafield(ownerId, field.key, value, type);
+          const userErrors = response?.metafieldsSet?.userErrors ?? [];
+          if (userErrors.length > 0) {
+            resultStage = "metafield";
+            metafieldUserErrors.push(...userErrors);
+            logger.error("product_sync_metafield_error", {
+              ...baseContext(),
+              metafield_key: `custom.${field.key}`,
+              metafield_type: type,
+              owner_id: ownerId,
+              error_graphql_user_errors: userErrors,
+              root_cause_summary: "metafield_user_errors",
+            });
+          } else {
+            logger.info("product_sync_metafield_success", {
+              ...baseContext(),
+              metafield_key: `custom.${field.key}`,
+              metafield_type: type,
+              owner_id: ownerId,
+            });
+          }
+        } catch (error) {
+          resultStage = "metafield";
+          logger.error("product_sync_metafield_error", {
+            ...baseContext(),
+            metafield_key: `custom.${field.key}`,
+            metafield_type: type,
+            owner_id: ownerId,
             ...extractErrorDetails(error),
           });
           throw buildStageError("metafield", baseContext(), error);

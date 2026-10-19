@@ -280,6 +280,18 @@ function ensureGraphqlProductId(ownerId) {
   return ownerId;
 }
 
+function ensureGraphqlInventoryItemId(inventoryItemId) {
+  if (!inventoryItemId) {
+    return null;
+  }
+
+  if (typeof inventoryItemId === "number" || /^[0-9]+$/.test(inventoryItemId.toString())) {
+    return `gid://shopify/InventoryItem/${inventoryItemId}`;
+  }
+
+  return inventoryItemId;
+}
+
 export async function findVariantBySku(sku) {
   if (!sku) {
     return null;
@@ -412,4 +424,53 @@ export async function setProductMetafield(ownerId, key, value, type = "single_li
   }
 
   return data;
+}
+
+// Shopify keeps a shippable product's native weight on the inventory item,
+// rather than on the product itself.
+export async function setInventoryItemWeight(inventoryItemId, kilograms) {
+  const ownerId = ensureGraphqlInventoryItemId(inventoryItemId);
+  if (!ownerId) {
+    throw new Error("missing_inventory_item_id");
+  }
+
+  const value = Number(kilograms);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error("invalid_inventory_item_weight");
+  }
+
+  const mutation = `
+    mutation updateInventoryItemWeight($id: ID!, $input: InventoryItemInput!) {
+      inventoryItemUpdate(id: $id, input: $input) {
+        inventoryItem {
+          id
+          measurement {
+            weight { value unit }
+          }
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const variables = {
+    id: ownerId,
+    input: {
+      measurement: {
+        weight: { value, unit: "KILOGRAMS" },
+      },
+    },
+  };
+
+  const data = await graphqlRequest(mutation, variables, { operationName: "inventoryItemUpdate" });
+  const userErrors = data?.inventoryItemUpdate?.userErrors ?? [];
+  if (userErrors.length > 0) {
+    throw buildShopifyApiError("Shopify rejected inventory item weight", {
+      operationName: "inventoryItemUpdate",
+      graphqlUserErrors: userErrors,
+      variablesSummary: summarizeVariables(variables),
+    });
+  }
+
+  return data?.inventoryItemUpdate?.inventoryItem ?? null;
 }
