@@ -11,7 +11,7 @@ import {
   findVariantBySku,
   findProductByMetafield,
   setProductMetafield,
-  setInventoryItemWeight,
+  setInventoryItemMeasurements,
 } from "./shopifyApi.js";
 import { getValidBlingAccessToken } from "./blingAuth.js";
 
@@ -334,6 +334,18 @@ function extractShippingMeasurements(product) {
     ),
     unit: dimensionUnit,
   };
+}
+
+function shopifyLengthUnit(unit) {
+  return (
+    {
+      mm: "MILLIMETERS",
+      cm: "CENTIMETERS",
+      m: "METERS",
+      in: "INCHES",
+      ft: "FEET",
+    }[unit] ?? "CENTIMETERS"
+  );
 }
 
 function describeType(value) {
@@ -1180,11 +1192,16 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
       }
     }
 
-    if (shippingMeasurements.weightKg !== null) {
-      stage = "weight";
-      logger.info("product_sync_weight_start", {
+    const hasPackedDimensions =
+      shippingMeasurements.height !== null &&
+      shippingMeasurements.width !== null &&
+      shippingMeasurements.depth !== null;
+    if (shippingMeasurements.weightKg !== null || hasPackedDimensions) {
+      stage = "shipping_measurements";
+      logger.info("product_sync_shipping_measurements_start", {
         ...baseContext(),
         weight_kg: shippingMeasurements.weightKg,
+        packed_dimensions: hasPackedDimensions,
       });
 
       try {
@@ -1192,19 +1209,25 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
           const fetched = await getShopifyProduct(result.product.id);
           inventoryItemId = extractInventoryItemId(fetched);
         }
-        await setInventoryItemWeight(inventoryItemId, shippingMeasurements.weightKg);
-        logger.info("product_sync_weight_success", {
+        await setInventoryItemMeasurements(inventoryItemId, shippingMeasurements.weightKg ?? 0, hasPackedDimensions ? {
+          height: shippingMeasurements.height,
+          width: shippingMeasurements.width,
+          length: shippingMeasurements.depth,
+          unit: shopifyLengthUnit(shippingMeasurements.unit),
+        } : null);
+        logger.info("product_sync_shipping_measurements_success", {
           ...baseContext(),
           inventory_item_id: inventoryItemId,
           weight_kg: shippingMeasurements.weightKg,
+          packed_dimensions: hasPackedDimensions,
         });
       } catch (error) {
-        logger.error("product_sync_weight_error", {
+        logger.error("product_sync_shipping_measurements_error", {
           ...baseContext(),
           weight_kg: shippingMeasurements.weightKg,
           ...extractErrorDetails(error),
         });
-        throw buildStageError("weight", baseContext(), error);
+        throw buildStageError("shipping_measurements", baseContext(), error);
       }
     }
 

@@ -3,7 +3,7 @@ import fetch from "node-fetch";
 import { createLogger } from "./logger.js";
 
 const logger = createLogger("shopifyAuth");
-const DEFAULT_API_VERSION = "2026-01";
+const DEFAULT_API_VERSION = "2027-01";
 
 let tokenCache = {
   accessToken: null,
