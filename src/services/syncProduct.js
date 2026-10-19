@@ -279,11 +279,47 @@ function extractShippingMeasurements(product) {
     }
     return null;
   };
+  const readWeight = (...values) => {
+    let zero = null;
+    for (const value of values) {
+      const normalized = normalizeMeasurement(value);
+      if (normalized === null) {
+        continue;
+      }
+      if (normalized > 0) {
+        return normalized;
+      }
+      zero = normalized;
+    }
+    return zero;
+  };
+  const rawUnit = normalizeString(
+    dimensions?.unidadeMedida ?? dimensions?.unidade ?? product?.unidadeMedida ?? product?.unidade,
+  ).toLowerCase();
+  const mappedDimensionUnit = {
+      "0": "m",
+      "1": "cm",
+      "2": "mm",
+      metro: "m",
+      metros: "m",
+      centimetro: "cm",
+      centimetros: "cm",
+      milimetro: "mm",
+      milimetros: "mm",
+    }[rawUnit];
+  const dimensionUnit = mappedDimensionUnit || rawUnit || "cm";
 
   return {
     // Bling stores product weights in kilograms. Prefer gross weight because it
     // represents the item as shipped; fall back to net weight when necessary.
-    weightKg: read(product?.pesoBruto, product?.peso_bruto, product?.peso, product?.weight, product?.pesoLiquido, product?.peso_liquido),
+    weightKg: readWeight(
+      product?.pesoBruto,
+      product?.peso_bruto,
+      product?.peso,
+      product?.weight,
+      product?.pesoLiquido,
+      product?.peso_liquido,
+    ),
     height: read(dimensions?.altura, dimensions?.height, product?.altura, product?.height),
     width: read(dimensions?.largura, dimensions?.width, product?.largura, product?.width),
     depth: read(
@@ -296,7 +332,7 @@ function extractShippingMeasurements(product) {
       product?.length,
       product?.depth,
     ),
-    unit: normalizeString(dimensions?.unidadeMedida ?? dimensions?.unidade ?? product?.unidadeMedida ?? product?.unidade) || "cm",
+    unit: dimensionUnit,
   };
 }
 
