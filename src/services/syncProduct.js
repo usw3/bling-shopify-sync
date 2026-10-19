@@ -804,7 +804,7 @@ function logProductNormalizationDiagnostics(product, payload) {
 export async function syncProductFromBlingEvent(payload, meta = {}) {
   const eventType = meta.eventType ?? "product_change";
   const isDeleteEvent = eventType.toLowerCase().includes("excl");
-  const product = extractProduct(payload);
+  let product = extractProduct(payload);
   if (!product) {
     if (isDeleteEvent) {
       logger.warn("Product delete request missing payload", { eventType });
@@ -897,6 +897,41 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
       },
     });
 
+    // The Bling product webhook is intentionally a compact event payload and
+    // does not include shipping measurements. Fetching the product detail here
+    // makes pesoBruto and dimensoes available for every create/update event.
+    let detailProduct = null;
+    if (blingId) {
+      try {
+        logger.info("product_sync_detail_fetch_start", {
+          ...baseContext(),
+          bling_id: blingId,
+        });
+        detailProduct = await fetchBlingProductDetail(blingId);
+        if (detailProduct && typeof detailProduct === "object") {
+          product = { ...product, ...detailProduct };
+        }
+        logger.info("product_sync_detail_fetch_success", {
+          ...baseContext(),
+          bling_id: blingId,
+          has_shipping_measurements: Boolean(
+            extractShippingMeasurements(detailProduct).weightKg !== null ||
+              extractShippingMeasurements(detailProduct).height !== null ||
+              extractShippingMeasurements(detailProduct).width !== null ||
+              extractShippingMeasurements(detailProduct).depth !== null,
+          ),
+        });
+      } catch (error) {
+        // Keep the normal product sync working if Bling's detail endpoint has
+        // a transient error; the event payload remains the fallback source.
+        logger.warn("product_sync_detail_fetch_error", {
+          ...baseContext(),
+          bling_id: blingId,
+          error_message: error?.message ?? "detail_fetch_failed",
+        });
+      }
+    }
+
     const extractedImages = extractImages(product);
     const rawPayload = buildShopifyPayload(product, extractedImages.images);
     const shopifyPayload = applyFinalPayloadGuard(rawPayload, product);
@@ -907,28 +942,7 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
     handle = normalizeString(shopifyPayload?.product?.handle ?? handle) || null;
 
     const shortDescription = normalizeString(extractShortDescription(product));
-    let complement = normalizeString(extractComplement(product));
-    if (!complement && blingId) {
-      try {
-        logger.info("product_sync_complement_detail_fetch_start", {
-          ...baseContext(),
-          bling_id: blingId,
-        });
-        const detailProduct = await fetchBlingProductDetail(blingId);
-        complement = normalizeString(extractComplement(detailProduct));
-        logger.info("product_sync_complement_detail_fetch_result", {
-          ...baseContext(),
-          bling_id: blingId,
-          has_complement: Boolean(complement),
-        });
-      } catch (error) {
-        logger.warn("product_sync_complement_detail_fetch_error", {
-          ...baseContext(),
-          bling_id: blingId,
-          error_message: error?.message ?? "detail_fetch_failed",
-        });
-      }
-    }
+    const complement = normalizeString(extractComplement(product));
     const metafieldsToWrite = [];
     if (shortDescription) {
       metafieldsToWrite.push("custom.descricao_curta");
