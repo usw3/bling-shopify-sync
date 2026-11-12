@@ -651,6 +651,20 @@ function extractComplement(product) {
   );
 }
 
+// In the Bling API this field is returned as `observacoes`.  The alternate
+// spellings keep the mapping compatible with older exports and webhook data.
+function extractObservations(product) {
+  return (
+    product.observacoes ??
+    product.observacao ??
+    product.observações ??
+    product.observação ??
+    product.observacoesInternas ??
+    product.observacoes_internas ??
+    null
+  );
+}
+
 function parseJsonSafe(text) {
   try {
     return JSON.parse(text);
@@ -661,7 +675,8 @@ function parseJsonSafe(text) {
 
 async function fetchBlingProductDetail(blingId) {
   const accessToken = await getValidBlingAccessToken();
-  const response = await fetch(`https://api.bling.com.br/Api/v3/produtos/${blingId}`, {
+  const apiBase = (process.env.BLING_API_BASE ?? "https://api.bling.com.br/Api/v3").replace(/\/+$/, "");
+  const response = await fetch(`${apiBase}/produtos/${encodeURIComponent(blingId)}`, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       Accept: "application/json",
@@ -851,7 +866,8 @@ function logProductNormalizationDiagnostics(product, payload) {
 
 export async function syncProductFromBlingEvent(payload, meta = {}) {
   const eventType = meta.eventType ?? "product_change";
-  const isDeleteEvent = eventType.toLowerCase().includes("excl");
+  const normalizedEventType = eventType.toLowerCase();
+  const isDeleteEvent = normalizedEventType.includes("excl") || normalizedEventType.includes("delet");
   let product = extractProduct(payload);
   if (!product) {
     if (isDeleteEvent) {
@@ -991,12 +1007,16 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
 
     const shortDescription = normalizeString(extractShortDescription(product));
     const complement = normalizeString(extractComplement(product));
+    const observations = normalizeString(extractObservations(product));
     const metafieldsToWrite = [];
     if (shortDescription) {
       metafieldsToWrite.push("custom.descricao_curta");
     }
     if (complement) {
       metafieldsToWrite.push("custom.descricao_complementar");
+    }
+    if (observations) {
+      metafieldsToWrite.push("custom.observacoes");
     }
     if (blingId) {
       metafieldsToWrite.push("custom.bling_id");
@@ -1346,6 +1366,55 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
             stage: "metafield",
             result_stage: "metafield",
             root_cause_summary: rootCauseSummary(error),
+            ...extractErrorDetails(error),
+          });
+          throw buildStageError("metafield", baseContext(), error);
+        }
+      }
+
+      if (observations) {
+        stage = "metafield";
+        logger.info("product_sync_metafield_start", {
+          ...baseContext(),
+          metafield_key: "custom.observacoes",
+          metafield_type: "multi_line_text_field",
+          owner_id: ownerId,
+        });
+
+        try {
+          const response = await setProductMetafield(
+            ownerId,
+            "observacoes",
+            observations,
+            "multi_line_text_field",
+          );
+          const userErrors = response?.metafieldsSet?.userErrors ?? [];
+          if (userErrors.length > 0) {
+            resultStage = "metafield";
+            metafieldUserErrors.push(...userErrors);
+            logger.error("product_sync_metafield_error", {
+              ...baseContext(),
+              metafield_key: "custom.observacoes",
+              metafield_type: "multi_line_text_field",
+              owner_id: ownerId,
+              error_graphql_user_errors: userErrors,
+              root_cause_summary: "metafield_user_errors",
+            });
+          } else {
+            logger.info("product_sync_metafield_success", {
+              ...baseContext(),
+              metafield_key: "custom.observacoes",
+              metafield_type: "multi_line_text_field",
+              owner_id: ownerId,
+            });
+          }
+        } catch (error) {
+          resultStage = "metafield";
+          logger.error("product_sync_metafield_error", {
+            ...baseContext(),
+            metafield_key: "custom.observacoes",
+            metafield_type: "multi_line_text_field",
+            owner_id: ownerId,
             ...extractErrorDetails(error),
           });
           throw buildStageError("metafield", baseContext(), error);
