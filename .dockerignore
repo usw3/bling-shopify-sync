@@ -1,0 +1,7 @@
+node_modules
+.env
+.bling-token-cache.json
+.git
+.codex-local-backup
+tmp
+npm-debug.log*
