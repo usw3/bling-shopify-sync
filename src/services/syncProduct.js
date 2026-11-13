@@ -336,18 +336,6 @@ function extractShippingMeasurements(product) {
   };
 }
 
-function shopifyLengthUnit(unit) {
-  return (
-    {
-      mm: "MILLIMETERS",
-      cm: "CENTIMETERS",
-      m: "METERS",
-      in: "INCHES",
-      ft: "FEET",
-    }[unit] ?? "CENTIMETERS"
-  );
-}
-
 function describeType(value) {
   if (Array.isArray(value)) {
     return "array";
@@ -1216,7 +1204,10 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
       shippingMeasurements.height !== null &&
       shippingMeasurements.width !== null &&
       shippingMeasurements.depth !== null;
-    if (shippingMeasurements.weightKg !== null || hasPackedDimensions) {
+    // The current Shopify Admin API version only accepts weight here. Dimensions
+    // are persisted below as product metafields, which is compatible with the
+    // API version used by this app.
+    if (shippingMeasurements.weightKg !== null) {
       stage = "shipping_measurements";
       logger.info("product_sync_shipping_measurements_start", {
         ...baseContext(),
@@ -1229,12 +1220,7 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
           const fetched = await getShopifyProduct(result.product.id);
           inventoryItemId = extractInventoryItemId(fetched);
         }
-        await setInventoryItemMeasurements(inventoryItemId, shippingMeasurements.weightKg ?? 0, hasPackedDimensions ? {
-          height: shippingMeasurements.height,
-          width: shippingMeasurements.width,
-          length: shippingMeasurements.depth,
-          unit: shopifyLengthUnit(shippingMeasurements.unit),
-        } : null);
+        await setInventoryItemMeasurements(inventoryItemId, shippingMeasurements.weightKg);
         logger.info("product_sync_shipping_measurements_success", {
           ...baseContext(),
           inventory_item_id: inventoryItemId,
@@ -1247,7 +1233,8 @@ export async function syncProductFromBlingEvent(payload, meta = {}) {
           weight_kg: shippingMeasurements.weightKg,
           ...extractErrorDetails(error),
         });
-        throw buildStageError("shipping_measurements", baseContext(), error);
+        // A shipping-measurement failure must not prevent product metafields
+        // (including Bling observations) from being synchronized.
       }
     }
 

@@ -4,7 +4,9 @@ import { createLogger } from "../lib/logger.js";
 import { getShopifyAccessToken } from "../lib/shopifyAuth.js";
 
 const logger = createLogger("shopifyApi");
-const DEFAULT_API_VERSION = "2027-01";
+// Keep this aligned with the version documented in .env.example.  An invalid
+// future version makes every product webhook fail before any mapping runs.
+const DEFAULT_API_VERSION = "2026-01";
 let cachedLocationId = null;
 
 function assertConfig() {
@@ -428,7 +430,7 @@ export async function setProductMetafield(ownerId, key, value, type = "single_li
 
 // Shopify keeps a shippable product's native weight on the inventory item,
 // rather than on the product itself.
-export async function setInventoryItemMeasurements(inventoryItemId, kilograms, packedDimensions = null) {
+export async function setInventoryItemMeasurements(inventoryItemId, kilograms) {
   const ownerId = ensureGraphqlInventoryItemId(inventoryItemId);
   if (!ownerId) {
     throw new Error("missing_inventory_item_id");
@@ -442,9 +444,6 @@ export async function setInventoryItemMeasurements(inventoryItemId, kilograms, p
   const measurement = {
     weight: { value, unit: "KILOGRAMS" },
   };
-  if (packedDimensions) {
-    measurement.packedDimensions = packedDimensions;
-  }
 
   const mutation = `
     mutation updateInventoryItemMeasurements($id: ID!, $input: InventoryItemInput!) {
@@ -453,7 +452,6 @@ export async function setInventoryItemMeasurements(inventoryItemId, kilograms, p
           id
           measurement {
             weight { value unit }
-            packedDimensions { height length width unit }
           }
         }
         userErrors { field message }
